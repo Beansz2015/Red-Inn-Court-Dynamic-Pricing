@@ -75,30 +75,36 @@ Public Class DynamicPricingService
         Dim availabilityData As New Dictionary(Of String, RoomAvailability)
 
         Try
-            ' LittleHotelier API endpoint - adjust to your actual endpoint
-            Dim url = $"{apiBaseUrl}/rates?property_id={propertyId}"
+            ' Correct LittleHotelier API URL format
+            Dim startDate = DateTime.Now.ToString("yyyy-MM-dd")  ' Start from today
+            Dim url = $"{apiBaseUrl}properties/{propertyId}/rates.json?start_date={startDate}"
+
+            Console.WriteLine($"API URL: {url}")  ' Debug logging
 
             httpClient.DefaultRequestHeaders.Clear()
-            httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}")
+            ' Remove authorization header - no API key needed
             httpClient.DefaultRequestHeaders.Add("Accept", "application/json")
+            httpClient.DefaultRequestHeaders.Add("User-Agent", "RedInnDynamicPricing/1.0")
 
             Dim response = Await httpClient.GetAsync(url)
 
             If response.IsSuccessStatusCode Then
                 Dim jsonContent = Await response.Content.ReadAsStringAsync()
                 Console.WriteLine("Successfully retrieved API data")
+                Console.WriteLine($"Response length: {jsonContent.Length} characters")
 
                 Dim apiDataArray = JsonConvert.DeserializeObject(Of List(Of LittleHotelierResponse))(jsonContent)
 
-                ' Process the first property (Red Inn Court) - FIXED LINE
+                ' Process the first property (Red Inn Court)
                 If apiDataArray.Count > 0 Then
-                    Dim propertyData = apiDataArray(0)  ' Changed from "property" to "propertyData"
+                    Dim propertyData = apiDataArray(0)
                     availabilityData = ParseAvailabilityByDate(propertyData)
                     Console.WriteLine($"Parsed availability for {availabilityData.Count} dates")
                 End If
             Else
                 Dim errorContent = Await response.Content.ReadAsStringAsync()
                 Console.WriteLine($"API Error: {response.StatusCode} - {errorContent}")
+                Console.WriteLine($"Request URL: {url}")
             End If
 
         Catch ex As Exception
@@ -110,14 +116,17 @@ Public Class DynamicPricingService
     End Function
 
 
+
     Private Function ParseAvailabilityByDate(propertyData As LittleHotelierResponse) As Dictionary(Of String, RoomAvailability)
         Dim availabilityByDate As New Dictionary(Of String, RoomAvailability)
 
         ' Get next 3 days from today
+        ' Get current day plus next 3 days (total 4 days)
         Dim targetDates As New List(Of String)
-        For i As Integer = 1 To 3
+        For i As Integer = 0 To 3
             targetDates.Add(DateTime.Now.AddDays(i).ToString("yyyy-MM-dd"))
         Next
+
 
         ' Process each target date
         For Each targetDate In targetDates
@@ -177,10 +186,10 @@ Public Class DynamicPricingService
         For Each kvp In availabilityData
             Dim dateStr = kvp.Key
             Dim availability = kvp.Value
-            Dim daysAhead = (DateTime.Parse(dateStr) - DateTime.Now).Days
+            Dim DaysAhead = (DateTime.Parse(dateStr) - DateTime.Now).Days
 
             ' Only apply last-minute discounts for <15 days
-            If daysAhead < 15 Then
+            If DaysAhead < 15 Then
                 ' Calculate new discounts based on occupancy thresholds
                 Dim newDormDiscount = GetDiscountFromOccupancy(availability.DormOccupancyPct)
                 Dim newPrivateDiscount = GetDiscountFromOccupancy(availability.PrivateRoomsOccupancyPct)
@@ -199,7 +208,7 @@ Public Class DynamicPricingService
                         .NewDiscount = newDormDiscount,
                         .OccupancyPct = availability.DormOccupancyPct,
                         .AvailableUnits = availability.DormBedsAvailable,
-                        .daysAhead = daysAhead
+                        .DaysAhead = DaysAhead
                     })
                 End If
 
@@ -211,7 +220,7 @@ Public Class DynamicPricingService
                         .NewDiscount = newPrivateDiscount,
                         .OccupancyPct = availability.PrivateRoomsOccupancyPct,
                         .AvailableUnits = availability.PrivateRoomsAvailable,
-                        .daysAhead = daysAhead
+                        .DaysAhead = DaysAhead
                     })
                 End If
 
@@ -223,7 +232,7 @@ Public Class DynamicPricingService
                         .NewDiscount = newEnsuiteDiscount,
                         .OccupancyPct = availability.PrivateEnsuitesOccupancyPct,
                         .AvailableUnits = availability.PrivateEnsuitesAvailable,
-                        .daysAhead = daysAhead
+                        .DaysAhead = DaysAhead
                     })
                 End If
 
@@ -235,7 +244,7 @@ Public Class DynamicPricingService
                         .NewDiscount = newTwinDiscount,
                         .OccupancyPct = availability.TwinRoomsOccupancyPct,
                         .AvailableUnits = availability.TwinRoomsAvailable,
-                        .daysAhead = daysAhead
+                        .DaysAhead = DaysAhead
                     })
                 End If
 
@@ -294,14 +303,14 @@ Public Class DynamicPricingService
                 allDiscounts = JsonConvert.DeserializeObject(Of Dictionary(Of String, PreviousDiscount))(json)
             End If
 
-            ' Update for this date
             allDiscounts(dateStr) = New PreviousDiscount With {
-                .dormDiscount = dormDiscount,
-                .privateDiscount = privateDiscount,
-                .ensuiteDiscount = ensuiteDiscount,
-                .twinDiscount = twinDiscount,
-                .LastUpdated = DateTime.Now
-            }
+    .DormDiscount = dormDiscount,
+    .PrivateDiscount = privateDiscount,
+    .EnsuiteDiscount = ensuiteDiscount,
+    .TwinDiscount = twinDiscount,
+    .LastUpdated = DateTime.Now
+}
+
 
             ' Clean up old entries (older than 7 days)
             Dim cutoffDate = DateTime.Now.AddDays(-7).ToString("yyyy-MM-dd")
@@ -318,6 +327,7 @@ Public Class DynamicPricingService
             Console.WriteLine($"Error updating stored discounts: {ex.Message}")
         End Try
     End Sub
+
 
     Public Async Function SendWhatsAppNotificationAsync(changes As List(Of DiscountChange)) As Task
         Try
