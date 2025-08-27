@@ -17,7 +17,7 @@ Public Class DynamicPricingService
     Private ReadOnly apiBaseUrl As String = ConfigurationManager.AppSettings("ApiBaseUrl")
 
     ' Room capacity configuration - based on your actual JSON data
-    Private ReadOnly totalDormBeds As Integer = 16 ' 2+4+4+6 = 16 beds total
+    Private ReadOnly totalDormBeds As Integer = 20 ' 2+4+4+6 = 16 beds total
     Private ReadOnly totalPrivateRooms As Integer = 3
     Private ReadOnly totalEnsuiteRooms As Integer = 2
     Private ReadOnly totalTwinRooms As Integer = 1
@@ -26,6 +26,8 @@ Public Class DynamicPricingService
     Private ReadOnly discountStorageFile As String = "previous_discounts.json"
 
     Public Async Function RunDynamicPricingCheck() As Task
+        Dim errorToReport As String = Nothing
+
         Try
             Console.WriteLine($"Starting dynamic pricing check at {DateTime.Now}")
 
@@ -53,9 +55,21 @@ Public Class DynamicPricingService
         Catch ex As Exception
             Console.WriteLine($"Error in dynamic pricing check: {ex.Message}")
             Console.WriteLine($"Stack trace: {ex.StackTrace}")
-            Await SendErrorNotificationAsync(ex.Message)
+
+            ' Store error for notification outside try-catch
+            errorToReport = ex.Message
         End Try
+
+        ' Send error notification if there was an error
+        If errorToReport IsNot Nothing Then
+            Try
+                Await SendErrorNotificationAsync(errorToReport)
+            Catch notificationEx As Exception
+                Console.WriteLine($"Failed to send error notification: {notificationEx.Message}")
+            End Try
+        End If
     End Function
+
 
     Public Async Function GetRoomAvailabilityAsync() As Task(Of Dictionary(Of String, RoomAvailability))
         Dim availabilityData As New Dictionary(Of String, RoomAvailability)
@@ -76,10 +90,10 @@ Public Class DynamicPricingService
 
                 Dim apiDataArray = JsonConvert.DeserializeObject(Of List(Of LittleHotelierResponse))(jsonContent)
 
-                ' Process the first property (Red Inn Court)
+                ' Process the first property (Red Inn Court) - FIXED LINE
                 If apiDataArray.Count > 0 Then
-                    Dim property = apiDataArray(0)
-                    availabilityData = ParseAvailabilityByDate(property)
+                    Dim propertyData = apiDataArray(0)  ' Changed from "property" to "propertyData"
+                    availabilityData = ParseAvailabilityByDate(propertyData)
                     Console.WriteLine($"Parsed availability for {availabilityData.Count} dates")
                 End If
             Else
@@ -94,6 +108,7 @@ Public Class DynamicPricingService
 
         Return availabilityData
     End Function
+
 
     Private Function ParseAvailabilityByDate(propertyData As LittleHotelierResponse) As Dictionary(Of String, RoomAvailability)
         Dim availabilityByDate As New Dictionary(Of String, RoomAvailability)
