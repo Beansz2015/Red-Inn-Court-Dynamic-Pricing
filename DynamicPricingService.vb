@@ -5,6 +5,7 @@ Imports System.Text
 Imports System.IO
 Imports System.Configuration
 
+
 Public Class DynamicPricingService
     Private ReadOnly httpClient As New HttpClient()
 
@@ -27,6 +28,42 @@ Public Class DynamicPricingService
 
     ' Storage file - keep as is
     Private ReadOnly discountStorageFile As String = "previous_discounts.json"
+
+    Private ReadOnly profiles As Dictionary(Of String, DiscountProfile)
+
+    '--------------------------------------------
+    ' Constructor – runs once per service launch
+    '--------------------------------------------
+    Public Sub New()
+        ' Build the profiles dictionary from App.config
+        profiles = New Dictionary(Of String, DiscountProfile)(StringComparer.OrdinalIgnoreCase) From {
+        {"Dorm", LoadProfile("Dorm")},
+        {"Private", LoadProfile("Private")},
+        {"Ensuite", LoadProfile("Ensuite")},
+        {"Twin", LoadProfile("Twin")}
+    }
+    End Sub
+
+    Private Function LoadProfile(tag As String) As DiscountProfile
+        Dim t = ConfigurationManager.AppSettings($"Thresholds{tag}")?.Split(","c)
+        Dim d = ConfigurationManager.AppSettings($"Discounts{tag}")?.Split(","c)
+        If t Is Nothing OrElse d Is Nothing OrElse d.Length <> t.Length + 1 Then
+            ' fall back to hard-coded defaults
+            t = {"60", "80", "90"}
+            d = {"15", "10", "5", "0"}
+        End If
+        Return New DiscountProfile With {
+        .Thresholds = t.Select(Function(x) Double.Parse(x.Trim())).ToArray(),
+        .Discounts = d.Select(Function(x) Double.Parse(x.Trim())).ToArray()
+    }
+    End Function
+
+    ' Holds one room-type’s pricing rules
+    Private Class DiscountProfile
+        Public Thresholds As Double()   ' ascending, e.g. {60,80,90}
+        Public Discounts As Double()   ' descending, e.g. {15,10,5,0}
+    End Class
+
 
 
     Public Async Function RunDynamicPricingCheck() As Task
@@ -238,10 +275,10 @@ Public Class DynamicPricingService
             ' Only apply last-minute discounts for <15 days
             If DaysAhead < 15 Then
                 ' Calculate new discounts based on occupancy thresholds
-                Dim newDormDiscount = GetDiscountFromOccupancy(availability.DormOccupancyPct)
-                Dim newPrivateDiscount = GetDiscountFromOccupancy(availability.PrivateRoomsOccupancyPct)
-                Dim newEnsuiteDiscount = GetDiscountFromOccupancy(availability.PrivateEnsuitesOccupancyPct)
-                Dim newTwinDiscount = GetDiscountFromOccupancy(availability.TwinRoomsOccupancyPct)
+                Dim newDormDiscount = GetDiscount("Dorm", availability.DormOccupancyPct)
+                Dim newPrivateDiscount = GetDiscount("Private", availability.PrivateRoomsOccupancyPct)
+                Dim newEnsuiteDiscount = GetDiscount("Ensuite", availability.PrivateEnsuitesOccupancyPct)
+                Dim newTwinDiscount = GetDiscount("Twin", availability.TwinRoomsOccupancyPct)
 
                 ' Get previous discounts from storage
                 Dim previousDiscounts = GetPreviousDiscounts(dateStr)
@@ -303,29 +340,39 @@ Public Class DynamicPricingService
         Return changes
     End Function
 
-    Private Function GetDiscountFromOccupancy(occupancyPct As Double) As Double
-        ' Based on occupancy thresholds: <60%, 60-79%, 80-89%, 90%+
-        Select Case occupancyPct
-            Case >= 90
-                Return 0.0 ' No discount - high occupancy
-            Case >= 80
-                Return 5.0 ' 5% discount - medium-high occupancy
-            Case >= 60
-                Return 10.0 ' 10% discount - medium occupancy
-            Case Else
-                Return 15.0 ' Full last-minute discount - low occupancy
-        End Select
+    'Private Function GetDiscountFromOccupancy(occupancyPct As Double) As Double
+    ' Based on occupancy thresholds: <60%, 60-79%, 80-89%, 90%+
+    'Select Case occupancyPct
+    'Case >= 90
+    'Return 0.0 ' No discount - high occupancy
+    'Case >= 80
+    'Return 5.0 ' 5% discount - medium-high occupancy
+    'Case >= 60
+    'Return 10.0 ' 10% discount - medium occupancy
+    'Case Else
+    'Return 15.0 ' Full last-minute discount - low occupancy
+    'End Select
+    'End Function
+
+    Private Function GetDiscount(roomTag As String, occPct As Double) As Double
+        Dim p = profiles(roomTag)
+        For i = p.Thresholds.Length - 1 To 0 Step -1
+            If occPct >= p.Thresholds(i) Then Return p.Discounts(i + 1)
+        Next
+        Return p.Discounts(0)  ' below the first threshold
     End Function
 
-    ' Returns the discounts that WOULD apply today based on the latest occupancy
+    ' Returns the discounts that WOULD apply right now, using
+    ' the dynamic profiles already loaded at startup.
     Private Function GetCurrentDiscounts(avail As RoomAvailability) As PreviousDiscount
         Return New PreviousDiscount With {
-        .DormDiscount = GetDiscountFromOccupancy(avail.DormOccupancyPct),
-        .PrivateDiscount = GetDiscountFromOccupancy(avail.PrivateRoomsOccupancyPct),
-        .EnsuiteDiscount = GetDiscountFromOccupancy(avail.PrivateEnsuitesOccupancyPct),
-        .TwinDiscount = GetDiscountFromOccupancy(avail.TwinRoomsOccupancyPct)
+        .DormDiscount = GetDiscount("Dorm", avail.DormOccupancyPct),
+        .PrivateDiscount = GetDiscount("Private", avail.PrivateRoomsOccupancyPct),
+        .EnsuiteDiscount = GetDiscount("Ensuite", avail.PrivateEnsuitesOccupancyPct),
+        .TwinDiscount = GetDiscount("Twin", avail.TwinRoomsOccupancyPct)
     }
     End Function
+
 
 
     Private Function GetPreviousDiscounts(dateStr As String) As PreviousDiscount
