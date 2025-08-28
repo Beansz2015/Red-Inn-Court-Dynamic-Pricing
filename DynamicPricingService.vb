@@ -11,19 +11,23 @@ Public Class DynamicPricingService
     ' Configuration settings
     Private ReadOnly apiKey As String = ConfigurationManager.AppSettings("LittleHotelierApiKey")
     Private ReadOnly propertyId As String = ConfigurationManager.AppSettings("PropertyId")
-    Private ReadOnly whatsappToken As String = ConfigurationManager.AppSettings("WhatsAppToken")
-    Private ReadOnly whatsappPhoneId As String = ConfigurationManager.AppSettings("WhatsAppPhoneId")
-    Private ReadOnly companyGroupId As String = ConfigurationManager.AppSettings("CompanyGroupId")
     Private ReadOnly apiBaseUrl As String = ConfigurationManager.AppSettings("ApiBaseUrl")
 
-    ' Room capacity configuration - based on your actual JSON data
-    Private ReadOnly totalDormBeds As Integer = 20 ' 2+4+4+6 = 16 beds total
+    ' REPLACE WhatsApp settings with Twilio settings
+    Private ReadOnly twilioAccountSid As String = ConfigurationManager.AppSettings("TwilioAccountSid")
+    Private ReadOnly twilioAuthToken As String = ConfigurationManager.AppSettings("TwilioAuthToken")
+    Private ReadOnly twilioFromNumber As String = ConfigurationManager.AppSettings("TwilioFromNumber")
+    Private ReadOnly notificationRecipient As String = ConfigurationManager.AppSettings("NotificationRecipient")
+
+    ' Room capacity configuration - keep as is
+    Private ReadOnly totalDormBeds As Integer = 20
     Private ReadOnly totalPrivateRooms As Integer = 3
     Private ReadOnly totalEnsuiteRooms As Integer = 2
     Private ReadOnly totalTwinRooms As Integer = 1
 
-    ' Storage file for tracking previous discounts
+    ' Storage file - keep as is
     Private ReadOnly discountStorageFile As String = "previous_discounts.json"
+
 
     Public Async Function RunDynamicPricingCheck() As Task
         Dim errorToReport As String = Nothing
@@ -42,10 +46,10 @@ Public Class DynamicPricingService
             ' Calculate new discounts and detect changes
             Dim discountChanges = CalculateDiscountChanges(availabilityData)
 
-            ' Send WhatsApp notifications if there are changes
+            ' Send Twilio WhatsApp notifications if there are changes
             If discountChanges.Any() Then
-                Await SendWhatsAppNotificationAsync(discountChanges)
-                Console.WriteLine($"Sent WhatsApp notification for {discountChanges.Count} discount changes")
+                Await SendTwilioWhatsAppAsync(discountChanges)  ' CHANGED from SendWhatsAppNotificationAsync
+                Console.WriteLine($"Sent Twilio WhatsApp notification for {discountChanges.Count} discount changes")
             Else
                 Console.WriteLine("No discount changes detected")
             End If
@@ -63,12 +67,13 @@ Public Class DynamicPricingService
         ' Send error notification if there was an error
         If errorToReport IsNot Nothing Then
             Try
-                Await SendErrorNotificationAsync(errorToReport)
+                Await SendTwilioErrorNotificationAsync(errorToReport)  ' CHANGED from SendErrorNotificationAsync
             Catch notificationEx As Exception
-                Console.WriteLine($"Failed to send error notification: {notificationEx.Message}")
+                Console.WriteLine($"Failed to send Twilio error notification: {notificationEx.Message}")
             End Try
         End If
     End Function
+
 
 
     Public Async Function GetRoomAvailabilityAsync() As Task(Of Dictionary(Of String, RoomAvailability))
@@ -170,11 +175,53 @@ Public Class DynamicPricingService
 
             availabilityByDate(targetDate) = availability
 
+            ' ---- NEW VERBOSE OUTPUT WITH DISCOUNT INFO ----
+            Dim prev = GetPreviousDiscounts(targetDate)
+            Dim curr = GetCurrentDiscounts(availability)
+
             Console.WriteLine($"Date: {targetDate}")
-            Console.WriteLine($"  Dorms: {availability.DormBedsAvailable}/{totalDormBeds} available ({availability.DormOccupancyPct:F1}% occupied)")
-            Console.WriteLine($"  Private: {availability.PrivateRoomsAvailable}/{totalPrivateRooms} available ({availability.PrivateRoomsOccupancyPct:F1}% occupied)")
-            Console.WriteLine($"  Ensuite: {availability.PrivateEnsuitesAvailable}/{totalEnsuiteRooms} available ({availability.PrivateEnsuitesOccupancyPct:F1}% occupied)")
-            Console.WriteLine($"  Twin: {availability.TwinRoomsAvailable}/{totalTwinRooms} available ({availability.TwinRoomsOccupancyPct:F1}% occupied)")
+
+            ' Dorms
+            Dim dormLine = $"  Dorms: {availability.DormBedsAvailable}/{totalDormBeds} available " &
+                           $"({availability.DormOccupancyPct:F1}% occupied) - "
+            If prev.DormDiscount = -1 Or prev.DormDiscount = curr.DormDiscount Then
+                dormLine &= $"{curr.DormDiscount}% discount"
+            Else
+                dormLine &= $"{prev.DormDiscount}% → {curr.DormDiscount}% discount"
+            End If
+            Console.WriteLine(dormLine)
+
+            ' Private rooms
+            Dim privLine = $"  Private: {availability.PrivateRoomsAvailable}/{totalPrivateRooms} available " &
+                           $"({availability.PrivateRoomsOccupancyPct:F1}% occupied) - "
+            If prev.PrivateDiscount = -1 Or prev.PrivateDiscount = curr.PrivateDiscount Then
+                privLine &= $"{curr.PrivateDiscount}% discount"
+            Else
+                privLine &= $"{prev.PrivateDiscount}% → {curr.PrivateDiscount}% discount"
+            End If
+            Console.WriteLine(privLine)
+
+            ' Ensuite rooms
+            Dim ensLine = $"  Ensuite: {availability.PrivateEnsuitesAvailable}/{totalEnsuiteRooms} available " &
+                          $"({availability.PrivateEnsuitesOccupancyPct:F1}% occupied) - "
+            If prev.EnsuiteDiscount = -1 Or prev.EnsuiteDiscount = curr.EnsuiteDiscount Then
+                ensLine &= $"{curr.EnsuiteDiscount}% discount"
+            Else
+                ensLine &= $"{prev.EnsuiteDiscount}% → {curr.EnsuiteDiscount}% discount"
+            End If
+            Console.WriteLine(ensLine)
+
+            ' Twin room
+            Dim twinLine = $"  Twin: {availability.TwinRoomsAvailable}/{totalTwinRooms} available " &
+                           $"({availability.TwinRoomsOccupancyPct:F1}% occupied) - "
+            If prev.TwinDiscount = -1 Or prev.TwinDiscount = curr.TwinDiscount Then
+                twinLine &= $"{curr.TwinDiscount}% discount"
+            Else
+                twinLine &= $"{prev.TwinDiscount}% → {curr.TwinDiscount}% discount"
+            End If
+            Console.WriteLine(twinLine)
+            ' -----------------------------------------------
+
         Next
 
         Return availabilityByDate
@@ -270,6 +317,17 @@ Public Class DynamicPricingService
         End Select
     End Function
 
+    ' Returns the discounts that WOULD apply today based on the latest occupancy
+    Private Function GetCurrentDiscounts(avail As RoomAvailability) As PreviousDiscount
+        Return New PreviousDiscount With {
+        .DormDiscount = GetDiscountFromOccupancy(avail.DormOccupancyPct),
+        .PrivateDiscount = GetDiscountFromOccupancy(avail.PrivateRoomsOccupancyPct),
+        .EnsuiteDiscount = GetDiscountFromOccupancy(avail.PrivateEnsuitesOccupancyPct),
+        .TwinDiscount = GetDiscountFromOccupancy(avail.TwinRoomsOccupancyPct)
+    }
+    End Function
+
+
     Private Function GetPreviousDiscounts(dateStr As String) As PreviousDiscount
         Try
             If File.Exists(discountStorageFile) Then
@@ -329,40 +387,43 @@ Public Class DynamicPricingService
     End Sub
 
 
-    Public Async Function SendWhatsAppNotificationAsync(changes As List(Of DiscountChange)) As Task
+    Public Async Function SendTwilioWhatsAppAsync(changes As List(Of DiscountChange)) As Task
         Try
             Dim message = BuildDiscountChangeMessage(changes)
 
-            Dim whatsappUrl = $"https://graph.facebook.com/v18.0/{whatsappPhoneId}/messages"
+            ' Twilio API endpoint
+            Dim url = $"https://api.twilio.com/2010-04-01/Accounts/{twilioAccountSid}/Messages.json"
 
-            Dim payload = New With {
-                .messaging_product = "whatsapp",
-                .to = companyGroupId,
-                .type = "text",
-                .text = New With {
-                    .body = message
-                }
-            }
+            ' Create credentials for Basic Auth
+            Dim credentials = Convert.ToBase64String(Encoding.ASCII.GetBytes($"{twilioAccountSid}:{twilioAuthToken}"))
 
-            Dim jsonPayload = JsonConvert.SerializeObject(payload)
-            Dim content = New StringContent(jsonPayload, Encoding.UTF8, "application/json")
+            ' Prepare form data for Twilio
+            Dim formData = New List(Of KeyValuePair(Of String, String)) From {
+            New KeyValuePair(Of String, String)("From", twilioFromNumber),
+            New KeyValuePair(Of String, String)("To", notificationRecipient),
+            New KeyValuePair(Of String, String)("Body", message)
+        }
 
+            Dim content = New FormUrlEncodedContent(formData)
+
+            ' Set up HTTP client with Basic Auth
             httpClient.DefaultRequestHeaders.Clear()
-            httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {whatsappToken}")
+            httpClient.DefaultRequestHeaders.Add("Authorization", $"Basic {credentials}")
 
-            Dim response = Await httpClient.PostAsync(whatsappUrl, content)
+            Dim response = Await httpClient.PostAsync(url, content)
 
             If response.IsSuccessStatusCode Then
-                Console.WriteLine("WhatsApp notification sent successfully")
+                Console.WriteLine("Twilio WhatsApp message sent successfully")
             Else
                 Dim errorContent = Await response.Content.ReadAsStringAsync()
-                Console.WriteLine($"WhatsApp API Error: {response.StatusCode} - {errorContent}")
+                Console.WriteLine($"Twilio Error: {response.StatusCode} - {errorContent}")
             End If
 
         Catch ex As Exception
-            Console.WriteLine($"Error sending WhatsApp message: {ex.Message}")
+            Console.WriteLine($"Error sending Twilio WhatsApp: {ex.Message}")
         End Try
     End Function
+
 
     Private Function BuildDiscountChangeMessage(changes As List(Of DiscountChange)) As String
         Dim message As New StringBuilder()
@@ -389,32 +450,30 @@ Public Class DynamicPricingService
         Return message.ToString()
     End Function
 
-    Public Async Function SendErrorNotificationAsync(errorMessage As String) As Task
+    Public Async Function SendTwilioErrorNotificationAsync(errorMessage As String) As Task
         Try
             Dim message = $"🚨 *DYNAMIC PRICING ERROR* 🚨{vbCrLf}{vbCrLf}❌ {errorMessage}{vbCrLf}{vbCrLf}⏰ {DateTime.Now:yyyy-MM-dd HH:mm}{vbCrLf}{vbCrLf}Please check the application logs for more details."
 
-            Dim whatsappUrl = $"https://graph.facebook.com/v18.0/{whatsappPhoneId}/messages"
+            Dim url = $"https://api.twilio.com/2010-04-01/Accounts/{twilioAccountSid}/Messages.json"
+            Dim credentials = Convert.ToBase64String(Encoding.ASCII.GetBytes($"{twilioAccountSid}:{twilioAuthToken}"))
 
-            Dim payload = New With {
-                .messaging_product = "whatsapp",
-                .to = companyGroupId,
-                .type = "text",
-                .text = New With {
-                    .body = message
-                }
+            Dim formData = New List(Of KeyValuePair(Of String, String)) From {
+                New KeyValuePair(Of String, String)("From", twilioFromNumber),
+                New KeyValuePair(Of String, String)("To", notificationRecipient),
+                New KeyValuePair(Of String, String)("Body", message)
             }
 
-            Dim jsonPayload = JsonConvert.SerializeObject(payload)
-            Dim content = New StringContent(jsonPayload, Encoding.UTF8, "application/json")
+            Dim content = New FormUrlEncodedContent(formData)
 
             httpClient.DefaultRequestHeaders.Clear()
-            httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {whatsappToken}")
+            httpClient.DefaultRequestHeaders.Add("Authorization", $"Basic {credentials}")
 
-            Await httpClient.PostAsync(whatsappUrl, content)
+            Await httpClient.PostAsync(url, content)
 
         Catch ex As Exception
-            Console.WriteLine($"Error sending error notification: {ex.Message}")
+            Console.WriteLine($"Error sending Twilio error notification: {ex.Message}")
         End Try
     End Function
+
 
 End Class
