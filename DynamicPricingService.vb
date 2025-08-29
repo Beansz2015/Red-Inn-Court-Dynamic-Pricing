@@ -31,11 +31,28 @@ Public Class DynamicPricingService
 
     Private ReadOnly profiles As Dictionary(Of String, DiscountProfile)
 
+    ' Holds one room-type's rate rules
+    Private Class RateProfile
+        Public Thresholds As Double()   ' ascending, e.g. {60,80,90}
+        Public Rates As Double()        ' corresponding rates, e.g. {42,46,50,54}
+    End Class
+
+    Private ReadOnly rateProfiles As Dictionary(Of String, RateProfile)
+
+
     '--------------------------------------------
     ' Constructor – runs once per service launch
     '--------------------------------------------
     Public Sub New()
-        ' Build the profiles dictionary from App.config
+        ' Build the rate profiles dictionary from App.config
+        rateProfiles = New Dictionary(Of String, RateProfile)(StringComparer.OrdinalIgnoreCase) From {
+        {"Dorm", LoadRateProfile("Dorm")},
+        {"Private", LoadRateProfile("Private")},
+        {"Ensuite", LoadRateProfile("Ensuite")},
+        {"Twin", LoadRateProfile("Twin")}
+    }
+
+        ' Keep discount profiles for backward compatibility (can be removed later)
         profiles = New Dictionary(Of String, DiscountProfile)(StringComparer.OrdinalIgnoreCase) From {
         {"Dorm", LoadProfile("Dorm")},
         {"Private", LoadProfile("Private")},
@@ -44,18 +61,49 @@ Public Class DynamicPricingService
     }
     End Sub
 
-    Private Function LoadProfile(tag As String) As DiscountProfile
+
+    Private Function LoadRateProfile(tag As String) As RateProfile
         Dim t = ConfigurationManager.AppSettings($"Thresholds{tag}")?.Split(","c)
-        Dim d = ConfigurationManager.AppSettings($"Discounts{tag}")?.Split(","c)
-        If t Is Nothing OrElse d Is Nothing OrElse d.Length <> t.Length + 1 Then
-            ' fall back to hard-coded defaults
-            t = {"60", "80", "90"}
-            d = {"15", "10", "5", "0"}
+        Dim r = ConfigurationManager.AppSettings($"Rates{tag}")?.Split(","c)
+
+        ' Handle empty thresholds (like Twin)
+        If String.IsNullOrWhiteSpace(ConfigurationManager.AppSettings($"Thresholds{tag}")) Then
+            t = New String() {}
         End If
-        Return New DiscountProfile With {
-        .Thresholds = t.Select(Function(x) Double.Parse(x.Trim())).ToArray(),
-        .Discounts = d.Select(Function(x) Double.Parse(x.Trim())).ToArray()
+
+        If t Is Nothing OrElse r Is Nothing OrElse r.Length <> t.Length + 1 Then
+            ' fall back to hard-coded defaults based on your specifications
+            Select Case tag.ToLower()
+                Case "dorm"
+                    t = {"60", "80", "90"}
+                    r = {"42", "46", "50", "54"}
+                Case "private"
+                    t = {"30", "60"}
+                    r = {"108", "112", "116"}
+                Case "ensuite"
+                    t = {"50"}
+                    r = {"130", "150"}
+                Case "twin"
+                    t = New String() {}
+                    r = {"89"}
+                Case Else
+                    t = {"60", "80", "90"}
+                    r = {"42", "46", "50", "54"}
+            End Select
+        End If
+
+        Return New RateProfile With {
+        .Thresholds = If(t.Length > 0, t.Select(Function(x) Double.Parse(x.Trim())).ToArray(), New Double() {}),
+        .Rates = r.Select(Function(x) Double.Parse(x.Trim())).ToArray()
     }
+    End Function
+
+    Private Function GetRate(roomTag As String, occPct As Double) As Double
+        Dim p = rateProfiles(roomTag)
+        For i = p.Thresholds.Length - 1 To 0 Step -1
+            If occPct >= p.Thresholds(i) Then Return p.Rates(i + 1)
+        Next
+        Return p.Rates(0)  ' below the first threshold
     End Function
 
     ' Holds one room-type’s pricing rules
@@ -212,49 +260,49 @@ Public Class DynamicPricingService
 
             availabilityByDate(targetDate) = availability
 
-            ' ---- NEW VERBOSE OUTPUT WITH DISCOUNT INFO ----
-            Dim prev = GetPreviousDiscounts(targetDate)
-            Dim curr = GetCurrentDiscounts(availability)
+            ' ---- NEW VERBOSE OUTPUT WITH RATE INFO ----
+            Dim prevRates = GetPreviousRates(targetDate)
+            Dim currRates = GetCurrentRates(availability)
 
             Console.WriteLine($"Date: {targetDate}")
 
             ' Dorms
             Dim dormLine = $"  Dorms: {availability.DormBedsAvailable}/{totalDormBeds} available " &
-                           $"({availability.DormOccupancyPct:F1}% occupied) - "
-            If prev.DormDiscount = -1 Or prev.DormDiscount = curr.DormDiscount Then
-                dormLine &= $"{curr.DormDiscount}% discount"
+               $"({availability.DormOccupancyPct:F1}% occupied) - "
+            If prevRates.DormRate = -1 Or prevRates.DormRate = currRates.DormRate Then
+                dormLine &= $"RM{currRates.DormRate}"
             Else
-                dormLine &= $"{prev.DormDiscount}% → {curr.DormDiscount}% discount"
+                dormLine &= $"RM{prevRates.DormRate} → RM{currRates.DormRate}"
             End If
             Console.WriteLine(dormLine)
 
             ' Private rooms
             Dim privLine = $"  Private: {availability.PrivateRoomsAvailable}/{totalPrivateRooms} available " &
                            $"({availability.PrivateRoomsOccupancyPct:F1}% occupied) - "
-            If prev.PrivateDiscount = -1 Or prev.PrivateDiscount = curr.PrivateDiscount Then
-                privLine &= $"{curr.PrivateDiscount}% discount"
+            If prevRates.PrivateRate = -1 Or prevRates.PrivateRate = currRates.PrivateRate Then
+                privLine &= $"{currRates.PrivateRate}% discount"
             Else
-                privLine &= $"{prev.PrivateDiscount}% → {curr.PrivateDiscount}% discount"
+                privLine &= $"{prevRates.PrivateRate}% → {prevRates.PrivateRate}% discount"
             End If
             Console.WriteLine(privLine)
 
             ' Ensuite rooms
             Dim ensLine = $"  Ensuite: {availability.PrivateEnsuitesAvailable}/{totalEnsuiteRooms} available " &
                           $"({availability.PrivateEnsuitesOccupancyPct:F1}% occupied) - "
-            If prev.EnsuiteDiscount = -1 Or prev.EnsuiteDiscount = curr.EnsuiteDiscount Then
-                ensLine &= $"{curr.EnsuiteDiscount}% discount"
+            If prevRates.EnsuiteRate = -1 Or prevRates.EnsuiteRate = currRates.EnsuiteRate Then
+                ensLine &= $"{currRates.EnsuiteRate}% discount"
             Else
-                ensLine &= $"{prev.EnsuiteDiscount}% → {curr.EnsuiteDiscount}% discount"
+                ensLine &= $"{prevRates.EnsuiteRate}% → {currRates.EnsuiteRate}% discount"
             End If
             Console.WriteLine(ensLine)
 
             ' Twin room
             Dim twinLine = $"  Twin: {availability.TwinRoomsAvailable}/{totalTwinRooms} available " &
                            $"({availability.TwinRoomsOccupancyPct:F1}% occupied) - "
-            If prev.TwinDiscount = -1 Or prev.TwinDiscount = curr.TwinDiscount Then
-                twinLine &= $"{curr.TwinDiscount}% discount"
+            If prevRates.TwinRate = -1 Or prevRates.TwinRate = currRates.TwinRate Then
+                twinLine &= $"{currRates.TwinRate}% discount"
             Else
-                twinLine &= $"{prev.TwinDiscount}% → {curr.TwinDiscount}% discount"
+                twinLine &= $"{prevRates.TwinRate}% → {currRates.TwinRate}% discount"
             End If
             Console.WriteLine(twinLine)
             ' -----------------------------------------------
@@ -263,6 +311,28 @@ Public Class DynamicPricingService
 
         Return availabilityByDate
     End Function
+
+    ' Returns the rates that WOULD apply right now
+    Private Function GetCurrentRates(avail As RoomAvailability) As PreviousRate
+        Return New PreviousRate With {
+        .DormRate = GetRate("Dorm", avail.DormOccupancyPct),
+        .PrivateRate = GetRate("Private", avail.PrivateRoomsOccupancyPct),
+        .EnsuiteRate = GetRate("Ensuite", avail.PrivateEnsuitesOccupancyPct),
+        .TwinRate = GetRate("Twin", avail.TwinRoomsOccupancyPct)
+    }
+    End Function
+
+    Private Function GetPreviousRates(dateStr As String) As PreviousRate
+        ' Similar to GetPreviousDiscounts but for rates
+        ' You'll need to create a "previous_rates.json" file or modify existing storage
+        Return New PreviousRate With {
+        .DormRate = -1,
+        .PrivateRate = -1,
+        .EnsuiteRate = -1,
+        .TwinRate = -1
+    }
+    End Function
+
 
     Private Function CalculateDiscountChanges(availabilityData As Dictionary(Of String, RoomAvailability)) As List(Of DiscountChange)
         Dim changes As New List(Of DiscountChange)
@@ -472,9 +542,9 @@ Public Class DynamicPricingService
     End Function
 
 
-    Private Function BuildDiscountChangeMessage(changes As List(Of DiscountChange)) As String
+    Private Function BuildRateChangeMessage(changes As List(Of RateChange)) As String
         Dim message As New StringBuilder()
-        message.AppendLine("🏨 *RED INN COURT - DISCOUNT UPDATE* 🏨")
+        message.AppendLine("🏨 *RED INN COURT - RATE UPDATE* 🏨")
         message.AppendLine($"📅 {DateTime.Now:yyyy-MM-dd HH:mm}")
         message.AppendLine("")
 
@@ -484,18 +554,18 @@ Public Class DynamicPricingService
             message.AppendLine($"📊 Occupancy: {change.OccupancyPct:F1}%")
             message.AppendLine($"🛏️ Available: {change.AvailableUnits} units")
 
-            If change.OldDiscount = -1 Then
-                message.AppendLine($"💰 New Discount: *{change.NewDiscount}%*")
+            If change.OldRate = -1 Then
+                message.AppendLine($"💰 New Rate: *RM{change.NewRate}*")
             Else
-                message.AppendLine($"💰 Discount: {change.OldDiscount}% → *{change.NewDiscount}%*")
+                message.AppendLine($"💰 Rate: RM{change.OldRate} → *RM{change.NewRate}*")
             End If
             message.AppendLine("")
         Next
 
         message.AppendLine("Generated by Dynamic Pricing Bot 🤖")
-
         Return message.ToString()
     End Function
+
 
     Public Async Function SendTwilioErrorNotificationAsync(errorMessage As String) As Task
         Try
