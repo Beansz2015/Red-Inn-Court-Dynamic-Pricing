@@ -2,17 +2,20 @@
 Public Class RateChange
     Public Property CheckDate As String
     Public Property RoomType As String
-    Public Property OldRate As Double
-    Public Property NewRate As Double
-    Public Property OccupancyPct As Double
+    Public Property OldRegularRate As Double
+    Public Property NewRegularRate As Double
+    Public Property OldWalkInRate As Double
+    Public Property NewWalkInRate As Double
     Public Property AvailableUnits As Integer
     Public Property DaysAhead As Integer
 End Class
 
 Public Class PreviousRate
-    Public Property DormRate As Double
-    Public Property PrivateRate As Double
-    Public Property EnsuiteRate As Double
-    Public Property TwinRate As Double
+    Public Property DormRegularRate As Double
+    Public Property DormWalkInRate As Double
+    Public Property PrivateRegularRate As Double
+    Public Property PrivateWalkInRate As Double
+    Public Property EnsuiteRegularRate As Double
+    Public Property EnsuiteWalkInRate As Double
     Public Property LastUpdated As DateTime
 End Class

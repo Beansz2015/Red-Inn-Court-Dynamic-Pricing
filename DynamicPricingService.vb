@@ -28,81 +28,14 @@ Public Class DynamicPricingService
     Private ReadOnly baseDormBeds As Integer = 20
     Private ReadOnly basePrivateRooms As Integer = 3
     Private ReadOnly baseEnsuiteRooms As Integer = 2
-    Private ReadOnly baseTwinRooms As Integer = 1
 
     ' Calculate effective capacity minus temporarily closed units
     Private ReadOnly totalDormBeds As Integer = baseDormBeds - CInt(If(ConfigurationManager.AppSettings("TemporaryClosedDormBeds"), "0"))
     Private ReadOnly totalPrivateRooms As Integer = basePrivateRooms - CInt(If(ConfigurationManager.AppSettings("TemporaryClosedPrivateRooms"), "0"))
     Private ReadOnly totalEnsuiteRooms As Integer = baseEnsuiteRooms - CInt(If(ConfigurationManager.AppSettings("TemporaryClosedEnsuiteRooms"), "0"))
-    Private ReadOnly totalTwinRooms As Integer = baseTwinRooms - CInt(If(ConfigurationManager.AppSettings("TemporaryClosedTwinRooms"), "0"))
 
     ' Storage file for rates
     Private ReadOnly rateStorageFile As String = "previous_rates.json"
-
-    ' Rate profile class
-    Private Class RateProfile
-        Public Thresholds As Double()
-        Public Rates As Double()
-    End Class
-
-    Private ReadOnly rateProfiles As Dictionary(Of String, RateProfile)
-
-    '--------------------------------------------
-    ' Constructor – runs once per service launch
-    '--------------------------------------------
-    Public Sub New()
-        ' Build the rate profiles dictionary from App.config
-        rateProfiles = New Dictionary(Of String, RateProfile)(StringComparer.OrdinalIgnoreCase) From {
-            {"Dorm", LoadRateProfile("Dorm")},
-            {"Private", LoadRateProfile("Private")},
-            {"Ensuite", LoadRateProfile("Ensuite")},
-            {"Twin", LoadRateProfile("Twin")}
-        }
-    End Sub
-
-    Private Function LoadRateProfile(tag As String) As RateProfile
-        Dim t = ConfigurationManager.AppSettings($"Thresholds{tag}")?.Split(","c)
-        Dim r = ConfigurationManager.AppSettings($"Rates{tag}")?.Split(","c)
-
-        ' Handle empty thresholds (like Twin)
-        If String.IsNullOrWhiteSpace(ConfigurationManager.AppSettings($"Thresholds{tag}")) Then
-            t = New String() {}
-        End If
-
-        If t Is Nothing OrElse r Is Nothing OrElse r.Length <> t.Length + 1 Then
-            ' Fall back to hard-coded defaults
-            Select Case tag.ToLower()
-                Case "dorm"
-                    t = {"60", "80", "90"}
-                    r = {"42", "46", "50", "54"}
-                Case "private"
-                    t = {"30", "60"}
-                    r = {"108", "112", "116"}
-                Case "ensuite"
-                    t = {"50"}
-                    r = {"130", "150"}
-                Case "twin"
-                    t = New String() {}
-                    r = {"89"}
-                Case Else
-                    t = {"60", "80", "90"}
-                    r = {"42", "46", "50", "54"}
-            End Select
-        End If
-
-        Return New RateProfile With {
-            .Thresholds = If(t.Length > 0, t.Select(Function(x) Double.Parse(x.Trim())).ToArray(), New Double() {}),
-            .Rates = r.Select(Function(x) Double.Parse(x.Trim())).ToArray()
-        }
-    End Function
-
-    Private Function GetRate(roomTag As String, occPct As Double) As Double
-        Dim p = rateProfiles(roomTag)
-        For i = p.Thresholds.Length - 1 To 0 Step -1
-            If occPct >= p.Thresholds(i) Then Return p.Rates(i + 1)
-        Next
-        Return p.Rates(0)
-    End Function
 
     Public Async Function RunDynamicPricingCheck() As Task
         Dim errorToReport As String = Nothing
@@ -203,8 +136,7 @@ Public Class DynamicPricingService
                 .CheckDate = targetDate,
                 .DormBedsAvailable = 0,
                 .PrivateRoomsAvailable = 0,
-                .PrivateEnsuitesAvailable = 0,
-                .TwinRoomsAvailable = 0
+                .PrivateEnsuitesAvailable = 0
             }
 
             ' Sum up availability by room category for this specific date
@@ -219,62 +151,110 @@ Public Class DynamicPricingService
                             availability.PrivateRoomsAvailable += dateEntry.available
                         Case "superior queen ensuite"
                             availability.PrivateEnsuitesAvailable += dateEntry.available
-                        Case "twin (shared bathroom)"
-                            availability.TwinRoomsAvailable += dateEntry.available
                     End Select
                 End If
             Next
-
-            ' Calculate occupancy percentages
-            availability.DormOccupancyPct = ((totalDormBeds - availability.DormBedsAvailable) / totalDormBeds) * 100
-            availability.PrivateRoomsOccupancyPct = ((totalPrivateRooms - availability.PrivateRoomsAvailable) / totalPrivateRooms) * 100
-            availability.PrivateEnsuitesOccupancyPct = ((totalEnsuiteRooms - availability.PrivateEnsuitesAvailable) / totalEnsuiteRooms) * 100
-            availability.TwinRoomsOccupancyPct = ((totalTwinRooms - availability.TwinRoomsAvailable) / totalTwinRooms) * 100
-
-            ' Ensure occupancy doesn't go below 0%
-            availability.DormOccupancyPct = Math.Max(0, availability.DormOccupancyPct)
-            availability.PrivateRoomsOccupancyPct = Math.Max(0, availability.PrivateRoomsOccupancyPct)
-            availability.PrivateEnsuitesOccupancyPct = Math.Max(0, availability.PrivateEnsuitesOccupancyPct)
-            availability.TwinRoomsOccupancyPct = Math.Max(0, availability.TwinRoomsOccupancyPct)
 
             availabilityByDate(targetDate) = availability
 
             ' Display current rates
             Dim prevRates = GetPreviousRates(targetDate)
-            Dim currRates = GetCurrentRates(availability)
+            Dim currRates = GetCurrentRates(availability, targetDate)
 
-            Console.WriteLine($"Date: {targetDate}")
-            Console.WriteLine($"  Dorms: {availability.DormBedsAvailable}/{totalDormBeds} available ({availability.DormOccupancyPct:F1}% occupied) - " &
-                            If(prevRates.DormRate = -1 Or prevRates.DormRate = currRates.DormRate,
-                               $"RM{currRates.DormRate}",
-                               $"RM{prevRates.DormRate} → RM{currRates.DormRate}"))
+            Dim daysAhead = (DateTime.Parse(targetDate) - DateTime.Now).Days
+            Dim dayLabel = If(daysAhead = 0, "Today", If(daysAhead = 1, "Day +1", "Day >+2"))
 
-            Console.WriteLine($"  Private: {availability.PrivateRoomsAvailable}/{totalPrivateRooms} available ({availability.PrivateRoomsOccupancyPct:F1}% occupied) - " &
-                            If(prevRates.PrivateRate = -1 Or prevRates.PrivateRate = currRates.PrivateRate,
-                               $"RM{currRates.PrivateRate}",
-                               $"RM{prevRates.PrivateRate} → RM{currRates.PrivateRate}"))
+            Console.WriteLine($"Date: {targetDate} ({dayLabel})")
+            Console.WriteLine($"  Dorms: {availability.DormBedsAvailable}/{totalDormBeds} available - " &
+                            If(prevRates.DormRegularRate = -1 Or (prevRates.DormRegularRate = currRates.DormRegularRate And prevRates.DormWalkInRate = currRates.DormWalkInRate),
+                               $"RM{currRates.DormRegularRate}/RM{currRates.DormWalkInRate}",
+                               $"RM{prevRates.DormRegularRate}/RM{prevRates.DormWalkInRate} → RM{currRates.DormRegularRate}/RM{currRates.DormWalkInRate}"))
 
-            Console.WriteLine($"  Ensuite: {availability.PrivateEnsuitesAvailable}/{totalEnsuiteRooms} available ({availability.PrivateEnsuitesOccupancyPct:F1}% occupied) - " &
-                            If(prevRates.EnsuiteRate = -1 Or prevRates.EnsuiteRate = currRates.EnsuiteRate,
-                               $"RM{currRates.EnsuiteRate}",
-                               $"RM{prevRates.EnsuiteRate} → RM{currRates.EnsuiteRate}"))
+            Console.WriteLine($"  Private: {availability.PrivateRoomsAvailable}/{totalPrivateRooms} available - " &
+                            If(prevRates.PrivateRegularRate = -1 Or (prevRates.PrivateRegularRate = currRates.PrivateRegularRate And prevRates.PrivateWalkInRate = currRates.PrivateWalkInRate),
+                               $"RM{currRates.PrivateRegularRate}/RM{currRates.PrivateWalkInRate}",
+                               $"RM{prevRates.PrivateRegularRate}/RM{prevRates.PrivateWalkInRate} → RM{currRates.PrivateRegularRate}/RM{currRates.PrivateWalkInRate}"))
 
-            Console.WriteLine($"  Twin: {availability.TwinRoomsAvailable}/{totalTwinRooms} available ({availability.TwinRoomsOccupancyPct:F1}% occupied) - " &
-                            If(prevRates.TwinRate = -1 Or prevRates.TwinRate = currRates.TwinRate,
-                               $"RM{currRates.TwinRate}",
-                               $"RM{prevRates.TwinRate} → RM{currRates.TwinRate}"))
+            Console.WriteLine($"  Ensuite: {availability.PrivateEnsuitesAvailable}/{totalEnsuiteRooms} available - " &
+                            If(prevRates.EnsuiteRegularRate = -1 Or (prevRates.EnsuiteRegularRate = currRates.EnsuiteRegularRate And prevRates.EnsuiteWalkInRate = currRates.EnsuiteWalkInRate),
+                               $"RM{currRates.EnsuiteRegularRate}/RM{currRates.EnsuiteWalkInRate}",
+                               $"RM{prevRates.EnsuiteRegularRate}/RM{prevRates.EnsuiteWalkInRate} → RM{currRates.EnsuiteRegularRate}/RM{currRates.EnsuiteWalkInRate}"))
         Next
 
         Return availabilityByDate
     End Function
 
-    Private Function GetCurrentRates(avail As RoomAvailability) As PreviousRate
+    Private Function GetCurrentRates(avail As RoomAvailability, dateStr As String) As PreviousRate
+        Dim daysAhead = (DateTime.Parse(dateStr) - DateTime.Now).Days
+        Dim dayPrefix As String
+
+        If daysAhead = 0 Then
+            dayPrefix = "Today"
+        ElseIf daysAhead = 1 Then
+            dayPrefix = "Day1_"
+        Else
+            dayPrefix = "Day2Plus_"
+        End If
+
+        ' Get Dorm rates
+        Dim dormRates = GetRoomTypeRates("Dorm", dayPrefix, avail.DormBedsAvailable)
+
+        ' Get Private rates  
+        Dim privateRates = GetRoomTypeRates("Private", dayPrefix, avail.PrivateRoomsAvailable)
+
+        ' Get Ensuite rates
+        Dim ensuiteRates = GetRoomTypeRates("Ensuite", dayPrefix, avail.PrivateEnsuitesAvailable)
+
         Return New PreviousRate With {
-            .DormRate = GetRate("Dorm", avail.DormOccupancyPct),
-            .PrivateRate = GetRate("Private", avail.PrivateRoomsOccupancyPct),
-            .EnsuiteRate = GetRate("Ensuite", avail.PrivateEnsuitesOccupancyPct),
-            .TwinRate = GetRate("Twin", avail.TwinRoomsOccupancyPct)
+            .DormRegularRate = dormRates.RegularRate,
+            .DormWalkInRate = dormRates.WalkInRate,
+            .PrivateRegularRate = privateRates.RegularRate,
+            .PrivateWalkInRate = privateRates.WalkInRate,
+            .EnsuiteRegularRate = ensuiteRates.RegularRate,
+            .EnsuiteWalkInRate = ensuiteRates.WalkInRate
         }
+    End Function
+
+    Private Function GetRoomTypeRates(roomType As String, dayPrefix As String, available As Integer) As (RegularRate As Double, WalkInRate As Double)
+        Dim configKey As String = ""
+
+        Select Case roomType.ToLower()
+            Case "dorm"
+                If available >= 8 Then
+                    configKey = $"{roomType}{dayPrefix}8Plus"
+                ElseIf available >= 4 Then
+                    configKey = $"{roomType}{dayPrefix}4to7"
+                ElseIf available >= 2 Then
+                    configKey = $"{roomType}{dayPrefix}2to3"
+                Else
+                    configKey = $"{roomType}{dayPrefix}1"
+                End If
+            Case "private"
+                If available >= 3 Then
+                    configKey = $"{roomType}{dayPrefix}3Rooms"
+                ElseIf available >= 2 Then
+                    configKey = $"{roomType}{dayPrefix}2Rooms"
+                Else
+                    configKey = $"{roomType}{dayPrefix}1Room"
+                End If
+            Case "ensuite"
+                If available >= 2 Then
+                    configKey = $"{roomType}{dayPrefix}2Rooms"
+                Else
+                    configKey = $"{roomType}{dayPrefix}1Room"
+                End If
+        End Select
+
+        Dim rateString = ConfigurationManager.AppSettings(configKey)
+        If Not String.IsNullOrEmpty(rateString) Then
+            Dim rates = rateString.Split(","c)
+            If rates.Length = 2 Then
+                Return (Double.Parse(rates(0)), Double.Parse(rates(1)))
+            End If
+        End If
+
+        ' Default rates if config not found
+        Return (50, 40)
     End Function
 
     Private Function GetPreviousRates(dateStr As String) As PreviousRate
@@ -292,10 +272,12 @@ Public Class DynamicPricingService
         End Try
 
         Return New PreviousRate With {
-            .DormRate = -1,
-            .PrivateRate = -1,
-            .EnsuiteRate = -1,
-            .TwinRate = -1
+            .DormRegularRate = -1,
+            .DormWalkInRate = -1,
+            .PrivateRegularRate = -1,
+            .PrivateWalkInRate = -1,
+            .EnsuiteRegularRate = -1,
+            .EnsuiteWalkInRate = -1
         }
     End Function
 
@@ -305,77 +287,94 @@ Public Class DynamicPricingService
         For Each kvp In availabilityData
             Dim dateStr = kvp.Key
             Dim availability = kvp.Value
-            Dim DaysAhead = (DateTime.Parse(dateStr) - DateTime.Now).Days
+            Dim daysAhead = (DateTime.Parse(dateStr) - DateTime.Now).Days
 
             ' Only apply dynamic pricing for <15 days
-            If DaysAhead < 15 Then
-                ' Calculate new rates based on occupancy thresholds
-                Dim newDormRate = GetRate("Dorm", availability.DormOccupancyPct)
-                Dim newPrivateRate = GetRate("Private", availability.PrivateRoomsOccupancyPct)
-                Dim newEnsuiteRate = GetRate("Ensuite", availability.PrivateEnsuitesOccupancyPct)
-                Dim newTwinRate = GetRate("Twin", availability.TwinRoomsOccupancyPct)
-
-                ' Get previous rates from storage
+            If daysAhead < 15 Then
+                Dim currentRates = GetCurrentRates(availability, dateStr)
                 Dim previousRates = GetPreviousRates(dateStr)
 
-                ' Check for changes and create notifications
-                If Math.Abs(newDormRate - previousRates.DormRate) > 0 Then
+                ' Check Dorm changes
+                If currentRates.DormRegularRate <> previousRates.DormRegularRate Or currentRates.DormWalkInRate <> previousRates.DormWalkInRate Then
                     changes.Add(New RateChange With {
                         .CheckDate = dateStr,
-                        .RoomType = "Dorm Beds",
-                        .OldRate = previousRates.DormRate,
-                        .NewRate = newDormRate,
-                        .OccupancyPct = availability.DormOccupancyPct,
+                        .RoomType = GetAvailabilityDescription("Dorm", availability.DormBedsAvailable),
+                        .OldRegularRate = previousRates.DormRegularRate,
+                        .NewRegularRate = currentRates.DormRegularRate,
+                        .OldWalkInRate = previousRates.DormWalkInRate,
+                        .NewWalkInRate = currentRates.DormWalkInRate,
                         .AvailableUnits = availability.DormBedsAvailable,
-                        .DaysAhead = DaysAhead
+                        .DaysAhead = daysAhead
                     })
                 End If
 
-                If Math.Abs(newPrivateRate - previousRates.PrivateRate) > 0 Then
+                ' Check Private changes
+                If currentRates.PrivateRegularRate <> previousRates.PrivateRegularRate Or currentRates.PrivateWalkInRate <> previousRates.PrivateWalkInRate Then
                     changes.Add(New RateChange With {
                         .CheckDate = dateStr,
-                        .RoomType = "Private Rooms (Shared Bath)",
-                        .OldRate = previousRates.PrivateRate,
-                        .NewRate = newPrivateRate,
-                        .OccupancyPct = availability.PrivateRoomsOccupancyPct,
+                        .RoomType = GetAvailabilityDescription("Private", availability.PrivateRoomsAvailable),
+                        .OldRegularRate = previousRates.PrivateRegularRate,
+                        .NewRegularRate = currentRates.PrivateRegularRate,
+                        .OldWalkInRate = previousRates.PrivateWalkInRate,
+                        .NewWalkInRate = currentRates.PrivateWalkInRate,
                         .AvailableUnits = availability.PrivateRoomsAvailable,
-                        .DaysAhead = DaysAhead
+                        .DaysAhead = daysAhead
                     })
                 End If
 
-                If Math.Abs(newEnsuiteRate - previousRates.EnsuiteRate) > 0 Then
+                ' Check Ensuite changes
+                If currentRates.EnsuiteRegularRate <> previousRates.EnsuiteRegularRate Or currentRates.EnsuiteWalkInRate <> previousRates.EnsuiteWalkInRate Then
                     changes.Add(New RateChange With {
                         .CheckDate = dateStr,
-                        .RoomType = "Queen Ensuite",
-                        .OldRate = previousRates.EnsuiteRate,
-                        .NewRate = newEnsuiteRate,
-                        .OccupancyPct = availability.PrivateEnsuitesOccupancyPct,
+                        .RoomType = GetAvailabilityDescription("Ensuite", availability.PrivateEnsuitesAvailable),
+                        .OldRegularRate = previousRates.EnsuiteRegularRate,
+                        .NewRegularRate = currentRates.EnsuiteRegularRate,
+                        .OldWalkInRate = previousRates.EnsuiteWalkInRate,
+                        .NewWalkInRate = currentRates.EnsuiteWalkInRate,
                         .AvailableUnits = availability.PrivateEnsuitesAvailable,
-                        .DaysAhead = DaysAhead
-                    })
-                End If
-
-                If Math.Abs(newTwinRate - previousRates.TwinRate) > 0 Then
-                    changes.Add(New RateChange With {
-                        .CheckDate = dateStr,
-                        .RoomType = "Twin Room (Shared Bath)",
-                        .OldRate = previousRates.TwinRate,
-                        .NewRate = newTwinRate,
-                        .OccupancyPct = availability.TwinRoomsOccupancyPct,
-                        .AvailableUnits = availability.TwinRoomsAvailable,
-                        .DaysAhead = DaysAhead
+                        .DaysAhead = daysAhead
                     })
                 End If
 
                 ' Update stored rates
-                UpdateStoredRates(dateStr, newDormRate, newPrivateRate, newEnsuiteRate, newTwinRate)
+                UpdateStoredRates(dateStr, currentRates)
             End If
         Next
 
         Return changes
     End Function
 
-    Private Sub UpdateStoredRates(dateStr As String, dormRate As Double, privateRate As Double, ensuiteRate As Double, twinRate As Double)
+    Private Function GetAvailabilityDescription(roomType As String, available As Integer) As String
+        Select Case roomType.ToLower()
+            Case "dorm"
+                If available >= 8 Then
+                    Return "Dorm Beds (8+ available)"
+                ElseIf available >= 4 Then
+                    Return "Dorm Beds (4-7 available)"
+                ElseIf available >= 2 Then
+                    Return "Dorm Beds (2-3 available)"
+                Else
+                    Return "Dorm Beds (1 available)"
+                End If
+            Case "private"
+                If available >= 3 Then
+                    Return "Private Rooms - Shared Bath (3 available)"
+                ElseIf available >= 2 Then
+                    Return "Private Rooms - Shared Bath (2 available)"
+                Else
+                    Return "Private Rooms - Shared Bath (1 available)"
+                End If
+            Case "ensuite"
+                If available >= 2 Then
+                    Return "Queen Ensuite (2 available)"
+                Else
+                    Return "Queen Ensuite (1 available)"
+                End If
+        End Select
+        Return roomType
+    End Function
+
+    Private Sub UpdateStoredRates(dateStr As String, rates As PreviousRate)
         Try
             Dim allRates As New Dictionary(Of String, PreviousRate)
 
@@ -384,13 +383,8 @@ Public Class DynamicPricingService
                 allRates = JsonConvert.DeserializeObject(Of Dictionary(Of String, PreviousRate))(json)
             End If
 
-            allRates(dateStr) = New PreviousRate With {
-                .DormRate = dormRate,
-                .PrivateRate = privateRate,
-                .EnsuiteRate = ensuiteRate,
-                .TwinRate = twinRate,
-                .LastUpdated = DateTime.Now
-            }
+            rates.LastUpdated = DateTime.Now
+            allRates(dateStr) = rates
 
             ' Clean up old entries (older than 7 days)
             Dim cutoffDate = DateTime.Now.AddDays(-7).ToString("yyyy-MM-dd")
@@ -427,16 +421,21 @@ Public Class DynamicPricingService
         body.AppendLine($"<br>")
 
         For Each change In changes
+            Dim dayLabel = If(change.DaysAhead = 0, "Today", If(change.DaysAhead = 1, "Tomorrow (Day +1)", $"Day >+2 ({change.DaysAhead} days ahead)"))
+
             body.AppendLine($"<div style='margin-bottom: 20px; padding: 15px; border-left: 4px solid #007bff; background-color: #f8f9fa;'>")
-            body.AppendLine($"<h3>📅 {change.CheckDate} ({change.DaysAhead} days ahead)</h3>")
+            body.AppendLine($"<h3>📅 {change.CheckDate} ({dayLabel})</h3>")
             body.AppendLine($"<p><strong>🏠 Room Type:</strong> {change.RoomType}</p>")
-            body.AppendLine($"<p><strong>📊 Occupancy:</strong> {change.OccupancyPct:F1}%</p>")
             body.AppendLine($"<p><strong>🛏️ Available Units:</strong> {change.AvailableUnits}</p>")
 
-            If change.OldRate = -1 Then
-                body.AppendLine($"<p><strong>💰 New Rate:</strong> <span style='color: #28a745; font-size: 1.1em;'>RM{change.NewRate}</span></p>")
+            If change.OldRegularRate = -1 Then
+                body.AppendLine($"<p><strong>💰 New Rates:</strong></p>")
+                body.AppendLine($"<p>• Regular: <span style='color: #28a745; font-size: 1.1em;'>RM{change.NewRegularRate}</span></p>")
+                body.AppendLine($"<p>• Walk-in: <span style='color: #28a745; font-size: 1.1em;'>RM{change.NewWalkInRate}</span></p>")
             Else
-                body.AppendLine($"<p><strong>💰 Rate Change:</strong> RM{change.OldRate} → <span style='color: #28a745; font-size: 1.1em;'>RM{change.NewRate}</span></p>")
+                body.AppendLine($"<p><strong>💰 Rate Changes:</strong></p>")
+                body.AppendLine($"<p>• Regular: RM{change.OldRegularRate} → <span style='color: #28a745; font-size: 1.1em;'>RM{change.NewRegularRate}</span></p>")
+                body.AppendLine($"<p>• Walk-in: RM{change.OldWalkInRate} → <span style='color: #28a745; font-size: 1.1em;'>RM{change.NewWalkInRate}</span></p>")
             End If
             body.AppendLine($"</div>")
         Next
