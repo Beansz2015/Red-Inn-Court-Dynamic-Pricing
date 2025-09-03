@@ -37,6 +37,17 @@ Public Class DynamicPricingService
     ' Storage file for rates
     Private ReadOnly rateStorageFile As String = "previous_rates.json"
 
+    ' Business timezone helper
+    Private Function GetBusinessDateTime() As DateTime
+        Dim businessTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Singapore Standard Time")
+        Return TimeZoneInfo.ConvertTime(DateTime.UtcNow, businessTimeZone)
+    End Function
+
+    Private Function GetBusinessToday() As DateTime
+        Return GetBusinessDateTime().Date
+    End Function
+
+
     Public Async Function RunDynamicPricingCheck() As Task
         Dim errorToReport As String = Nothing
 
@@ -84,7 +95,7 @@ Public Class DynamicPricingService
         Dim availabilityData As New Dictionary(Of String, RoomAvailability)
 
         Try
-            Dim startDate = DateTime.Now.ToString("yyyy-MM-dd")
+            Dim startDate = GetBusinessDateTime().ToString("yyyy-MM-dd")
             Dim url = $"{apiBaseUrl}properties/{propertyId}/rates.json?start_date={startDate}"
 
             Console.WriteLine($"API URL: {url}")
@@ -124,10 +135,10 @@ Public Class DynamicPricingService
     Private Function ParseAvailabilityByDate(propertyData As LittleHotelierResponse) As Dictionary(Of String, RoomAvailability)
         Dim availabilityByDate As New Dictionary(Of String, RoomAvailability)
 
-        ' Get current day plus next 3 days (total 4 days)
+        ' Get only 3 days: Today, Day +1, Day >+2
         Dim targetDates As New List(Of String)
-        For i As Integer = 0 To 3
-            targetDates.Add(DateTime.Now.AddDays(i).ToString("yyyy-MM-dd"))
+        For i As Integer = 0 To 2
+            targetDates.Add(GetBusinessDateTime().AddDays(i).ToString("yyyy-MM-dd"))
         Next
 
         ' Process each target date
@@ -162,7 +173,7 @@ Public Class DynamicPricingService
             Dim currRates = GetCurrentRates(availability, targetDate)
 
             ' FIXED: Use DateTime.Today instead of DateTime.Now for accurate day calculation
-            Dim daysAhead = DateDiff(DateInterval.Day, DateTime.Today, DateTime.Parse(targetDate))
+            Dim daysAhead = DateDiff(DateInterval.Day, GetBusinessToday(), DateTime.Parse(targetDate))
             Dim dayLabel = If(daysAhead = 0, "Today", If(daysAhead = 1, "Day +1", "Day >+2"))
 
             Console.WriteLine($"Date: {targetDate} ({dayLabel})")
@@ -186,9 +197,10 @@ Public Class DynamicPricingService
     End Function
 
 
+
     Private Function GetCurrentRates(avail As RoomAvailability, dateStr As String) As PreviousRate
         ' FIXED: Use DateTime.Today and DateDiff for accurate day calculation
-        Dim daysAhead = DateDiff(DateInterval.Day, DateTime.Today, DateTime.Parse(dateStr))
+        Dim daysAhead = DateDiff(DateInterval.Day, GetBusinessToday(), DateTime.Parse(dateStr))
         Dim dayPrefix As String
 
         If daysAhead = 0 Then
@@ -292,20 +304,61 @@ Public Class DynamicPricingService
             Dim dateStr = kvp.Key
             Dim availability = kvp.Value
             ' FIXED: Use DateTime.Today and DateDiff for accurate day calculation
-            Dim daysAhead = DateDiff(DateInterval.Day, DateTime.Today, DateTime.Parse(dateStr))
+            Dim daysAhead = DateDiff(DateInterval.Day, GetBusinessToday(), DateTime.Parse(dateStr))
 
             ' Only apply dynamic pricing for <15 days
             If daysAhead < 15 Then
                 Dim currentRates = GetCurrentRates(availability, dateStr)
                 Dim previousRates = GetPreviousRates(dateStr)
+                ' Check Dorm changes
+                If currentRates.DormRegularRate <> previousRates.DormRegularRate Or currentRates.DormWalkInRate <> previousRates.DormWalkInRate Then
+                    changes.Add(New RateChange With {
+                        .CheckDate = dateStr,
+                        .RoomType = GetAvailabilityDescription("Dorm", availability.DormBedsAvailable),
+                        .OldRegularRate = previousRates.DormRegularRate,
+                        .NewRegularRate = currentRates.DormRegularRate,
+                        .OldWalkInRate = previousRates.DormWalkInRate,
+                        .NewWalkInRate = currentRates.DormWalkInRate,
+                        .AvailableUnits = availability.DormBedsAvailable,
+                        .DaysAhead = daysAhead
+                    })
+                End If
 
-                ' ... rest of the function remains the same
+                ' Check Private changes
+                If currentRates.PrivateRegularRate <> previousRates.PrivateRegularRate Or currentRates.PrivateWalkInRate <> previousRates.PrivateWalkInRate Then
+                    changes.Add(New RateChange With {
+                        .CheckDate = dateStr,
+                        .RoomType = GetAvailabilityDescription("Private", availability.PrivateRoomsAvailable),
+                        .OldRegularRate = previousRates.PrivateRegularRate,
+                        .NewRegularRate = currentRates.PrivateRegularRate,
+                        .OldWalkInRate = previousRates.PrivateWalkInRate,
+                        .NewWalkInRate = currentRates.PrivateWalkInRate,
+                        .AvailableUnits = availability.PrivateRoomsAvailable,
+                        .DaysAhead = daysAhead
+                    })
+                End If
+
+                ' Check Ensuite changes
+                If currentRates.EnsuiteRegularRate <> previousRates.EnsuiteRegularRate Or currentRates.EnsuiteWalkInRate <> previousRates.EnsuiteWalkInRate Then
+                    changes.Add(New RateChange With {
+                        .CheckDate = dateStr,
+                        .RoomType = GetAvailabilityDescription("Ensuite", availability.PrivateEnsuitesAvailable),
+                        .OldRegularRate = previousRates.EnsuiteRegularRate,
+                        .NewRegularRate = currentRates.EnsuiteRegularRate,
+                        .OldWalkInRate = previousRates.EnsuiteWalkInRate,
+                        .NewWalkInRate = currentRates.EnsuiteWalkInRate,
+                        .AvailableUnits = availability.PrivateEnsuitesAvailable,
+                        .DaysAhead = daysAhead
+                    })
+                End If
+
+                ' Update stored rates
+                UpdateStoredRates(dateStr, currentRates)
             End If
         Next
 
         Return changes
     End Function
-
 
     Private Function GetAvailabilityDescription(roomType As String, available As Integer) As String
         Select Case roomType.ToLower()
