@@ -4,6 +4,8 @@ Imports Newtonsoft.Json
 Imports System.Text
 Imports System.IO
 Imports System.Configuration
+Imports System.Net.Mail
+Imports System.Net
 
 Public Class DynamicPricingService
     Private ReadOnly httpClient As New HttpClient()
@@ -13,11 +15,14 @@ Public Class DynamicPricingService
     Private ReadOnly propertyId As String = ConfigurationManager.AppSettings("PropertyId")
     Private ReadOnly apiBaseUrl As String = ConfigurationManager.AppSettings("ApiBaseUrl")
 
-    ' Twilio WhatsApp Settings
-    Private ReadOnly twilioAccountSid As String = ConfigurationManager.AppSettings("TwilioAccountSid")
-    Private ReadOnly twilioAuthToken As String = ConfigurationManager.AppSettings("TwilioAuthToken")
-    Private ReadOnly twilioFromNumber As String = ConfigurationManager.AppSettings("TwilioFromNumber")
-    Private ReadOnly notificationRecipient As String = ConfigurationManager.AppSettings("NotificationRecipient")
+    ' Email Settings
+    Private ReadOnly smtpHost As String = ConfigurationManager.AppSettings("SmtpHost")
+    Private ReadOnly smtpPort As Integer = CInt(ConfigurationManager.AppSettings("SmtpPort"))
+    Private ReadOnly smtpUsername As String = ConfigurationManager.AppSettings("SmtpUsername")
+    Private ReadOnly smtpPassword As String = ConfigurationManager.AppSettings("SmtpPassword")
+    Private ReadOnly emailFromAddress As String = ConfigurationManager.AppSettings("EmailFromAddress")
+    Private ReadOnly emailFromName As String = ConfigurationManager.AppSettings("EmailFromName")
+    Private ReadOnly emailToAddress As String = ConfigurationManager.AppSettings("EmailToAddress")
 
     ' Room capacity configuration with temporary closures
     Private ReadOnly baseDormBeds As Integer = 20
@@ -116,10 +121,10 @@ Public Class DynamicPricingService
             ' Calculate new rates and detect changes
             Dim rateChanges = CalculateRateChanges(availabilityData)
 
-            ' Send Twilio WhatsApp notifications if there are changes
+            ' Send email notifications if there are changes
             If rateChanges.Any() Then
-                Await SendTwilioWhatsAppAsync(rateChanges)
-                Console.WriteLine($"Sent Twilio WhatsApp notification for {rateChanges.Count} rate changes")
+                Await SendEmailNotificationAsync(rateChanges)
+                Console.WriteLine($"Sent email notification for {rateChanges.Count} rate changes")
             Else
                 Console.WriteLine("No rate changes detected")
             End If
@@ -135,9 +140,9 @@ Public Class DynamicPricingService
         ' Send error notification if there was an error
         If errorToReport IsNot Nothing Then
             Try
-                Await SendTwilioErrorNotificationAsync(errorToReport)
+                Await SendEmailErrorNotificationAsync(errorToReport)
             Catch notificationEx As Exception
-                Console.WriteLine($"Failed to send Twilio error notification: {notificationEx.Message}")
+                Console.WriteLine($"Failed to send email error notification: {notificationEx.Message}")
             End Try
         End If
     End Function
@@ -402,84 +407,87 @@ Public Class DynamicPricingService
         End Try
     End Sub
 
-    Public Async Function SendTwilioWhatsAppAsync(changes As List(Of RateChange)) As Task
+    Public Async Function SendEmailNotificationAsync(changes As List(Of RateChange)) As Task
         Try
-            Dim message = BuildRateChangeMessage(changes)
+            Dim subject = "🏨 Red Inn Court - Rate Update"
+            Dim body = BuildRateChangeEmailBody(changes)
 
-            Dim url = $"https://api.twilio.com/2010-04-01/Accounts/{twilioAccountSid}/Messages.json"
-            Dim credentials = Convert.ToBase64String(Encoding.ASCII.GetBytes($"{twilioAccountSid}:{twilioAuthToken}"))
-
-            Dim formData = New List(Of KeyValuePair(Of String, String)) From {
-                New KeyValuePair(Of String, String)("From", twilioFromNumber),
-                New KeyValuePair(Of String, String)("To", notificationRecipient),
-                New KeyValuePair(Of String, String)("Body", message)
-            }
-
-            Dim content = New FormUrlEncodedContent(formData)
-
-            httpClient.DefaultRequestHeaders.Clear()
-            httpClient.DefaultRequestHeaders.Add("Authorization", $"Basic {credentials}")
-
-            Dim response = Await httpClient.PostAsync(url, content)
-
-            If response.IsSuccessStatusCode Then
-                Console.WriteLine("Twilio WhatsApp message sent successfully")
-            Else
-                Dim errorContent = Await response.Content.ReadAsStringAsync()
-                Console.WriteLine($"Twilio Error: {response.StatusCode} - {errorContent}")
-            End If
+            Await SendEmailAsync(subject, body, False)
+            Console.WriteLine("Email notification sent successfully")
 
         Catch ex As Exception
-            Console.WriteLine($"Error sending Twilio WhatsApp: {ex.Message}")
+            Console.WriteLine($"Error sending email notification: {ex.Message}")
         End Try
     End Function
 
-    Private Function BuildRateChangeMessage(changes As List(Of RateChange)) As String
-        Dim message As New StringBuilder()
-        message.AppendLine("🏨 *RED INN COURT - RATE UPDATE* 🏨")
-        message.AppendLine($"📅 {DateTime.Now:yyyy-MM-dd HH:mm}")
-        message.AppendLine("")
+    Private Function BuildRateChangeEmailBody(changes As List(Of RateChange)) As String
+        Dim body As New StringBuilder()
+        body.AppendLine($"<h2>🏨 RED INN COURT - RATE UPDATE 🏨</h2>")
+        body.AppendLine($"<p><strong>📅 {DateTime.Now:yyyy-MM-dd HH:mm}</strong></p>")
+        body.AppendLine($"<br>")
 
         For Each change In changes
-            message.AppendLine($"📅 *{change.CheckDate}* ({change.DaysAhead} days ahead)")
-            message.AppendLine($"🏠 {change.RoomType}")
-            message.AppendLine($"📊 Occupancy: {change.OccupancyPct:F1}%")
-            message.AppendLine($"🛏️ Available: {change.AvailableUnits} units")
+            body.AppendLine($"<div style='margin-bottom: 20px; padding: 15px; border-left: 4px solid #007bff; background-color: #f8f9fa;'>")
+            body.AppendLine($"<h3>📅 {change.CheckDate} ({change.DaysAhead} days ahead)</h3>")
+            body.AppendLine($"<p><strong>🏠 Room Type:</strong> {change.RoomType}</p>")
+            body.AppendLine($"<p><strong>📊 Occupancy:</strong> {change.OccupancyPct:F1}%</p>")
+            body.AppendLine($"<p><strong>🛏️ Available Units:</strong> {change.AvailableUnits}</p>")
 
             If change.OldRate = -1 Then
-                message.AppendLine($"💰 New Rate: *RM{change.NewRate}*")
+                body.AppendLine($"<p><strong>💰 New Rate:</strong> <span style='color: #28a745; font-size: 1.1em;'>RM{change.NewRate}</span></p>")
             Else
-                message.AppendLine($"💰 Rate: RM{change.OldRate} → *RM{change.NewRate}*")
+                body.AppendLine($"<p><strong>💰 Rate Change:</strong> RM{change.OldRate} → <span style='color: #28a745; font-size: 1.1em;'>RM{change.NewRate}</span></p>")
             End If
-            message.AppendLine("")
+            body.AppendLine($"</div>")
         Next
 
-        message.AppendLine("Generated by Dynamic Pricing Bot 🤖")
-        Return message.ToString()
+        body.AppendLine($"<br><hr>")
+        body.AppendLine($"<p><em>Generated by Dynamic Pricing Bot 🤖</em></p>")
+        Return body.ToString()
     End Function
 
-    Public Async Function SendTwilioErrorNotificationAsync(errorMessage As String) As Task
+    Public Async Function SendEmailErrorNotificationAsync(errorMessage As String) As Task
         Try
-            Dim message = $"🚨 *DYNAMIC PRICING ERROR* 🚨{vbCrLf}{vbCrLf}❌ {errorMessage}{vbCrLf}{vbCrLf}⏰ {DateTime.Now:yyyy-MM-dd HH:mm}{vbCrLf}{vbCrLf}Please check the application logs for more details."
+            Dim subject = "🚨 Dynamic Pricing Error Alert"
+            Dim body = $"<h2>🚨 DYNAMIC PRICING ERROR 🚨</h2>" &
+                      $"<div style='padding: 15px; background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 5px; color: #721c24;'>" &
+                      $"<p><strong>❌ Error:</strong> {errorMessage}</p>" &
+                      $"<p><strong>⏰ Time:</strong> {DateTime.Now:yyyy-MM-dd HH:mm}</p>" &
+                      $"</div>" &
+                      $"<p>Please check the application logs for more details.</p>"
 
-            Dim url = $"https://api.twilio.com/2010-04-01/Accounts/{twilioAccountSid}/Messages.json"
-            Dim credentials = Convert.ToBase64String(Encoding.ASCII.GetBytes($"{twilioAccountSid}:{twilioAuthToken}"))
-
-            Dim formData = New List(Of KeyValuePair(Of String, String)) From {
-                New KeyValuePair(Of String, String)("From", twilioFromNumber),
-                New KeyValuePair(Of String, String)("To", notificationRecipient),
-                New KeyValuePair(Of String, String)("Body", message)
-            }
-
-            Dim content = New FormUrlEncodedContent(formData)
-
-            httpClient.DefaultRequestHeaders.Clear()
-            httpClient.DefaultRequestHeaders.Add("Authorization", $"Basic {credentials}")
-
-            Await httpClient.PostAsync(url, content)
+            Await SendEmailAsync(subject, body, True)
+            Console.WriteLine("Error email notification sent successfully")
 
         Catch ex As Exception
-            Console.WriteLine($"Error sending Twilio error notification: {ex.Message}")
+            Console.WriteLine($"Error sending email error notification: {ex.Message}")
+        End Try
+    End Function
+
+    Private Async Function SendEmailAsync(subject As String, body As String, isError As Boolean) As Task
+        Try
+            Using smtpClient As New SmtpClient(smtpHost, smtpPort)
+                smtpClient.EnableSsl = True
+                smtpClient.Credentials = New NetworkCredential(smtpUsername, smtpPassword)
+
+                Using message As New MailMessage()
+                    message.From = New MailAddress(emailFromAddress, emailFromName)
+                    message.To.Add(emailToAddress)
+                    message.Subject = subject
+                    message.Body = body
+                    message.IsBodyHtml = True
+
+                    If isError Then
+                        message.Priority = MailPriority.High
+                    End If
+
+                    Await smtpClient.SendMailAsync(message)
+                End Using
+            End Using
+
+        Catch ex As Exception
+            Console.WriteLine($"Error sending email: {ex.Message}")
+            Throw
         End Try
     End Function
 
