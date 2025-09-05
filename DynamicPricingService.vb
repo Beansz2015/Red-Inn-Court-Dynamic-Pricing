@@ -216,7 +216,7 @@ Public Class DynamicPricingService
 
             availabilityByDate(targetDate) = availability
 
-            ' Compare API rates vs calculated rates
+            ' Compare API rates vs calculated rates (simplified display)
             Dim calculatedRates = GetCurrentRates(availability, targetDate)
 
             ' Display rate comparison
@@ -226,18 +226,19 @@ Public Class DynamicPricingService
             Console.WriteLine($"Date: {targetDate} ({dayLabel})")
             Console.WriteLine($"  Dorms: {availability.DormBedsAvailable}/{totalDormBeds} available - " &
                     If(currentApiRates.DormRegularRate = calculatedRates.DormRegularRate,
-                       $"RM{calculatedRates.DormRegularRate}",
-                       $"RM{currentApiRates.DormRegularRate} → RM{calculatedRates.DormRegularRate}"))
+                       $"RM{calculatedRates.DormRegularRate}/RM{calculatedRates.DormWalkInRate}",
+                       $"RM{currentApiRates.DormRegularRate} → RM{calculatedRates.DormRegularRate} (Walk-in: RM{calculatedRates.DormWalkInRate})"))
 
             Console.WriteLine($"  Private: {availability.PrivateRoomsAvailable}/{totalPrivateRooms} available - " &
-                        If(currentApiRates.PrivateRegularRate = -1 Or (currentApiRates.PrivateRegularRate = calculatedRates.PrivateRegularRate And currentApiRates.PrivateWalkInRate = calculatedRates.PrivateWalkInRate),
-                           $"RM{calculatedRates.PrivateRegularRate}/RM{calculatedRates.PrivateWalkInRate}",
-                           $"RM{currentApiRates.PrivateRegularRate}/RM{currentApiRates.PrivateWalkInRate} → RM{calculatedRates.PrivateRegularRate}/RM{calculatedRates.PrivateWalkInRate}"))
+                    If(currentApiRates.PrivateRegularRate = calculatedRates.PrivateRegularRate,
+                       $"RM{calculatedRates.PrivateRegularRate}/RM{calculatedRates.PrivateWalkInRate}",
+                       $"RM{currentApiRates.PrivateRegularRate} → RM{calculatedRates.PrivateRegularRate} (Walk-in: RM{calculatedRates.PrivateWalkInRate})"))
 
             Console.WriteLine($"  Ensuite: {availability.PrivateEnsuitesAvailable}/{totalEnsuiteRooms} available - " &
-                        If(currentApiRates.EnsuiteRegularRate = -1 Or (currentApiRates.EnsuiteRegularRate = calculatedRates.EnsuiteRegularRate And currentApiRates.EnsuiteWalkInRate = calculatedRates.EnsuiteWalkInRate),
-                           $"RM{calculatedRates.EnsuiteRegularRate}/RM{calculatedRates.EnsuiteWalkInRate}",
-                           $"RM{currentApiRates.EnsuiteRegularRate}/RM{currentApiRates.EnsuiteWalkInRate} → RM{calculatedRates.EnsuiteRegularRate}/RM{calculatedRates.EnsuiteWalkInRate}"))
+                    If(currentApiRates.EnsuiteRegularRate = calculatedRates.EnsuiteRegularRate,
+                       $"RM{calculatedRates.EnsuiteRegularRate}/RM{calculatedRates.EnsuiteWalkInRate}",
+                       $"RM{currentApiRates.EnsuiteRegularRate} → RM{calculatedRates.EnsuiteRegularRate} (Walk-in: RM{calculatedRates.EnsuiteWalkInRate})"))
+
         Next
 
         Return availabilityByDate
@@ -380,54 +381,55 @@ Public Class DynamicPricingService
             ' Only apply dynamic pricing for <15 days
             If daysAhead < 15 Then
                 Dim calculatedRates = GetCurrentRates(availability, dateStr)
-                Dim apiCurrentRates = GetApiRatesFromResponse(propertyData, dateStr) ' Use API instead of JSON
+                Dim apiCurrentRates = GetApiRatesFromResponse(propertyData, dateStr)
 
-                ' Check for rate changes using API rates as baseline
-                If calculatedRates.DormRegularRate <> apiCurrentRates.DormRegularRate Or calculatedRates.DormWalkInRate <> apiCurrentRates.DormWalkInRate Then
+                ' Check Dorm REGULAR rate changes only
+                If calculatedRates.DormRegularRate <> apiCurrentRates.DormRegularRate Then
                     changes.Add(New RateChange With {
                     .CheckDate = dateStr,
                     .RoomType = GetAvailabilityDescription("Dorm", availability.DormBedsAvailable),
                     .OldRegularRate = apiCurrentRates.DormRegularRate,
                     .NewRegularRate = calculatedRates.DormRegularRate,
-                    .OldWalkInRate = apiCurrentRates.DormWalkInRate,
-                    .NewWalkInRate = calculatedRates.DormWalkInRate,
+                    .OldWalkInRate = -1, ' Not used anymore
+                    .NewWalkInRate = calculatedRates.DormWalkInRate, ' Show current walk-in rate
                     .AvailableUnits = availability.DormBedsAvailable,
                     .DaysAhead = daysAhead
                 })
                 End If
-                ' Check Private changes
-                If calculatedRates.PrivateRegularRate <> apiCurrentRates.PrivateRegularRate Or calculatedRates.PrivateWalkInRate <> apiCurrentRates.PrivateWalkInRate Then
+
+                ' Check Private REGULAR rate changes only
+                If calculatedRates.PrivateRegularRate <> apiCurrentRates.PrivateRegularRate Then
                     changes.Add(New RateChange With {
-                        .CheckDate = dateStr,
-                        .RoomType = GetAvailabilityDescription("Private", availability.PrivateRoomsAvailable),
-                        .OldRegularRate = apiCurrentRates.PrivateRegularRate,
-                        .NewRegularRate = calculatedRates.PrivateRegularRate,
-                        .OldWalkInRate = apiCurrentRates.PrivateWalkInRate,
-                        .NewWalkInRate = calculatedRates.PrivateWalkInRate,
-                        .AvailableUnits = availability.PrivateRoomsAvailable,
-                        .DaysAhead = daysAhead
-                    })
+                    .CheckDate = dateStr,
+                    .RoomType = GetAvailabilityDescription("Private", availability.PrivateRoomsAvailable),
+                    .OldRegularRate = apiCurrentRates.PrivateRegularRate,
+                    .NewRegularRate = calculatedRates.PrivateRegularRate,
+                    .OldWalkInRate = -1, ' Not used anymore
+                    .NewWalkInRate = calculatedRates.PrivateWalkInRate, ' Show current walk-in rate
+                    .AvailableUnits = availability.PrivateRoomsAvailable,
+                    .DaysAhead = daysAhead
+                })
                 End If
 
-                ' Check Ensuite changes
-                If calculatedRates.EnsuiteRegularRate <> apiCurrentRates.EnsuiteRegularRate Or calculatedRates.EnsuiteWalkInRate <> apiCurrentRates.EnsuiteWalkInRate Then
+                ' Check Ensuite REGULAR rate changes only
+                If calculatedRates.EnsuiteRegularRate <> apiCurrentRates.EnsuiteRegularRate Then
                     changes.Add(New RateChange With {
-                        .CheckDate = dateStr,
-                        .RoomType = GetAvailabilityDescription("Ensuite", availability.PrivateEnsuitesAvailable),
-                        .OldRegularRate = apiCurrentRates.EnsuiteRegularRate,
-                        .NewRegularRate = calculatedRates.EnsuiteRegularRate,
-                        .OldWalkInRate = apiCurrentRates.EnsuiteWalkInRate,
-                        .NewWalkInRate = calculatedRates.EnsuiteWalkInRate,
-                        .AvailableUnits = availability.PrivateEnsuitesAvailable,
-                        .DaysAhead = daysAhead
-                    })
+                    .CheckDate = dateStr,
+                    .RoomType = GetAvailabilityDescription("Ensuite", availability.PrivateEnsuitesAvailable),
+                    .OldRegularRate = apiCurrentRates.EnsuiteRegularRate,
+                    .NewRegularRate = calculatedRates.EnsuiteRegularRate,
+                    .OldWalkInRate = -1, ' Not used anymore
+                    .NewWalkInRate = calculatedRates.EnsuiteWalkInRate, ' Show current walk-in rate
+                    .AvailableUnits = availability.PrivateEnsuitesAvailable,
+                    .DaysAhead = daysAhead
+                })
                 End If
-
             End If
         Next
 
         Return changes
     End Function
+
 
     Private Function GetAvailabilityDescription(roomType As String, available As Integer) As String
         Select Case roomType.ToLower()
@@ -486,22 +488,27 @@ Public Class DynamicPricingService
             body.AppendLine($"<p><strong>🏠 Room Type:</strong> {change.RoomType}</p>")
             body.AppendLine($"<p><strong>🛏️ Available Units:</strong> {change.AvailableUnits}</p>")
 
-            If change.OldRegularRate = -1 Then
+            If change.OldRegularRate = 0 Then
+                ' First time setting rates (API had 0)
                 body.AppendLine($"<p><strong>💰 New Rates:</strong></p>")
                 body.AppendLine($"<p>• Regular: <span style='color: #28a745; font-size: 1.1em;'>RM{change.NewRegularRate}</span></p>")
-                body.AppendLine($"<p>• Walk-in: <span style='color: #28a745; font-size: 1.1em;'>RM{change.NewWalkInRate}</span></p>")
+                body.AppendLine($"<p>• Walk-in: <span style='color: #6c757d; font-size: 1.0em;'>RM{change.NewWalkInRate}</span></p>")
             Else
-                body.AppendLine($"<p><strong>💰 Rate Changes:</strong></p>")
+                ' Rate change detected
+                body.AppendLine($"<p><strong>💰 Rate Change:</strong></p>")
                 body.AppendLine($"<p>• Regular: RM{change.OldRegularRate} → <span style='color: #28a745; font-size: 1.1em;'>RM{change.NewRegularRate}</span></p>")
-                body.AppendLine($"<p>• Walk-in: RM{change.OldWalkInRate} → <span style='color: #28a745; font-size: 1.1em;'>RM{change.NewWalkInRate}</span></p>")
+                body.AppendLine($"<p>• Walk-in: <span style='color: #6c757d; font-size: 1.0em;'>RM{change.NewWalkInRate}</span> <em>(New rate)</em></p>")
             End If
             body.AppendLine($"</div>")
         Next
 
         body.AppendLine($"<br><hr>")
         body.AppendLine($"<p><em>Generated by Dynamic Pricing Bot 🤖</em></p>")
+        body.AppendLine($"<p style='font-size: 0.9em; color: #6c757d;'><em>Note: Walk-in rates are automatically calculated from regular rates and shown for reference.</em></p>")
+
         Return body.ToString()
     End Function
+
 
     Public Async Function SendEmailErrorNotificationAsync(errorMessage As String) As Task
         Try
