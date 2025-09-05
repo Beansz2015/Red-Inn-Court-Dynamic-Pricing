@@ -8,10 +8,10 @@ Imports System.Runtime.InteropServices
 
 ' Review the values of the assembly attributes
 
-<Assembly: AssemblyTitle("Red Inn Court Dynamic Pricing")>
+<Assembly: AssemblyTitle("RedInnCourtDynamicPricing")>
 <Assembly: AssemblyDescription("")>
 <Assembly: AssemblyCompany("")>
-<Assembly: AssemblyProduct("Red Inn Court Dynamic Pricing")>
+<Assembly: AssemblyProduct("RedInnCourtDynamicPricing")>
 <Assembly: AssemblyCopyright("Copyright ©  2025")>
 <Assembly: AssemblyTrademark("")>
 

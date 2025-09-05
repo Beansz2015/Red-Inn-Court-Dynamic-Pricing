@@ -34,8 +34,6 @@ Public Class DynamicPricingService
     Private ReadOnly totalPrivateRooms As Integer = basePrivateRooms - CInt(If(ConfigurationManager.AppSettings("TemporaryClosedPrivateRooms"), "0"))
     Private ReadOnly totalEnsuiteRooms As Integer = baseEnsuiteRooms - CInt(If(ConfigurationManager.AppSettings("TemporaryClosedEnsuiteRooms"), "0"))
 
-    ' Storage file for rates
-    Private ReadOnly rateStorageFile As String = "previous_rates.json"
 
     ' Business timezone helper
     Private Function GetBusinessDateTime() As DateTime
@@ -50,20 +48,21 @@ Public Class DynamicPricingService
 
     Public Async Function RunDynamicPricingCheck() As Task
         Dim errorToReport As String = Nothing
+        Dim propertyData As LittleHotelierResponse = Nothing
 
         Try
             Console.WriteLine($"Starting dynamic pricing check at {DateTime.Now}")
 
-            ' Get availability for next 3 days
-            Dim availabilityData = Await GetRoomAvailabilityAsync()
+            ' Get availability and store the API response
+            Dim availabilityResult = Await GetRoomAvailabilityWithResponseAsync()
 
-            If availabilityData.Count = 0 Then
+            If availabilityResult.AvailabilityData.Count = 0 Then
                 Console.WriteLine("No availability data retrieved. Exiting.")
                 Return
             End If
 
-            ' Calculate new rates and detect changes
-            Dim rateChanges = CalculateRateChanges(availabilityData)
+            ' Calculate new rates and detect changes using API data
+            Dim rateChanges = CalculateRateChanges(availabilityResult.AvailabilityData, availabilityResult.PropertyData)
 
             ' Send email notifications if there are changes
             If rateChanges.Any() Then
@@ -132,6 +131,35 @@ Public Class DynamicPricingService
         Return availabilityData
     End Function
 
+    Private Async Function GetRoomAvailabilityWithResponseAsync() As Task(Of (AvailabilityData As Dictionary(Of String, RoomAvailability), PropertyData As LittleHotelierResponse))
+        Dim availabilityData As New Dictionary(Of String, RoomAvailability)
+        Dim propertyData As LittleHotelierResponse = Nothing
+
+        Try
+            Dim startDate = GetBusinessDateTime().ToString("yyyy-MM-dd")
+            Dim url = $"{apiBaseUrl}properties/{propertyId}/rates.json?start_date={startDate}"
+
+            ' Existing API call code...
+            Dim response = Await httpClient.GetAsync(url)
+
+            If response.IsSuccessStatusCode Then
+                Dim jsonContent = Await response.Content.ReadAsStringAsync()
+                Dim apiDataArray = JsonConvert.DeserializeObject(Of List(Of LittleHotelierResponse))(jsonContent)
+
+                If apiDataArray.Count > 0 Then
+                    propertyData = apiDataArray(0)
+                    availabilityData = ParseAvailabilityByDate(propertyData)
+                End If
+            End If
+        Catch ex As Exception
+            Console.WriteLine($"Error fetching room availability: {ex.Message}")
+            Throw
+        End Try
+
+        Return (availabilityData, propertyData)
+    End Function
+
+
     Private Function ParseAvailabilityByDate(propertyData As LittleHotelierResponse) As Dictionary(Of String, RoomAvailability)
         Dim availabilityByDate As New Dictionary(Of String, RoomAvailability)
 
@@ -150,7 +178,17 @@ Public Class DynamicPricingService
             .PrivateEnsuitesAvailable = 0
         }
 
-            ' Sum up availability by room category for this specific date
+            ' NEW: Capture current rates from API
+            Dim currentApiRates As New PreviousRate With {
+            .DormRegularRate = 0,
+            .DormWalkInRate = 0,
+            .PrivateRegularRate = 0,
+            .PrivateWalkInRate = 0,
+            .EnsuiteRegularRate = 0,
+            .EnsuiteWalkInRate = 0
+        }
+
+            ' Sum up availability and capture rates by room category
             For Each ratePlan In propertyData.rate_plans
                 Dim dateEntry = ratePlan.rate_plan_dates.FirstOrDefault(Function(d) d.date = targetDate)
 
@@ -158,42 +196,99 @@ Public Class DynamicPricingService
                     Select Case ratePlan.name.ToLower()
                         Case "2 bed mixed dorm", "4 bed female dorm", "4 bed mixed dorm", "6 bed mixed dorm"
                             availability.DormBedsAvailable += dateEntry.available
+                            ' Capture dorm rate from API (assuming this represents regular rate)
+                            If currentApiRates.DormRegularRate = 0 Then
+                                currentApiRates.DormRegularRate = CDbl(dateEntry.rate)
+                            End If
                         Case "superior double (shared bathroom)"
                             availability.PrivateRoomsAvailable += dateEntry.available
+                            If currentApiRates.PrivateRegularRate = 0 Then
+                                currentApiRates.PrivateRegularRate = CDbl(dateEntry.rate)
+                            End If
                         Case "superior queen ensuite"
                             availability.PrivateEnsuitesAvailable += dateEntry.available
+                            If currentApiRates.EnsuiteRegularRate = 0 Then
+                                currentApiRates.EnsuiteRegularRate = CDbl(dateEntry.rate)
+                            End If
                     End Select
                 End If
             Next
 
             availabilityByDate(targetDate) = availability
 
-            ' Display current rates
-            Dim prevRates = GetPreviousRates(targetDate)
-            Dim currRates = GetCurrentRates(availability, targetDate)
+            ' Compare API rates vs calculated rates
+            Dim calculatedRates = GetCurrentRates(availability, targetDate)
 
-            ' FIXED: Use DateTime.Today instead of DateTime.Now for accurate day calculation
+            ' Display rate comparison
             Dim daysAhead = DateDiff(DateInterval.Day, GetBusinessToday(), DateTime.Parse(targetDate))
             Dim dayLabel = If(daysAhead = 0, "Today", If(daysAhead = 1, "Day +1", "Day >+2"))
 
             Console.WriteLine($"Date: {targetDate} ({dayLabel})")
             Console.WriteLine($"  Dorms: {availability.DormBedsAvailable}/{totalDormBeds} available - " &
-                        If(prevRates.DormRegularRate = -1 Or (prevRates.DormRegularRate = currRates.DormRegularRate And prevRates.DormWalkInRate = currRates.DormWalkInRate),
-                           $"RM{currRates.DormRegularRate}/RM{currRates.DormWalkInRate}",
-                           $"RM{prevRates.DormRegularRate}/RM{prevRates.DormWalkInRate} → RM{currRates.DormRegularRate}/RM{currRates.DormWalkInRate}"))
+                    If(currentApiRates.DormRegularRate = calculatedRates.DormRegularRate,
+                       $"RM{calculatedRates.DormRegularRate}",
+                       $"RM{currentApiRates.DormRegularRate} → RM{calculatedRates.DormRegularRate}"))
 
             Console.WriteLine($"  Private: {availability.PrivateRoomsAvailable}/{totalPrivateRooms} available - " &
-                        If(prevRates.PrivateRegularRate = -1 Or (prevRates.PrivateRegularRate = currRates.PrivateRegularRate And prevRates.PrivateWalkInRate = currRates.PrivateWalkInRate),
-                           $"RM{currRates.PrivateRegularRate}/RM{currRates.PrivateWalkInRate}",
-                           $"RM{prevRates.PrivateRegularRate}/RM{prevRates.PrivateWalkInRate} → RM{currRates.PrivateRegularRate}/RM{currRates.PrivateWalkInRate}"))
+                        If(currentApiRates.PrivateRegularRate = -1 Or (currentApiRates.PrivateRegularRate = calculatedRates.PrivateRegularRate And currentApiRates.PrivateWalkInRate = calculatedRates.PrivateWalkInRate),
+                           $"RM{calculatedRates.PrivateRegularRate}/RM{calculatedRates.PrivateWalkInRate}",
+                           $"RM{currentApiRates.PrivateRegularRate}/RM{currentApiRates.PrivateWalkInRate} → RM{calculatedRates.PrivateRegularRate}/RM{calculatedRates.PrivateWalkInRate}"))
 
             Console.WriteLine($"  Ensuite: {availability.PrivateEnsuitesAvailable}/{totalEnsuiteRooms} available - " &
-                        If(prevRates.EnsuiteRegularRate = -1 Or (prevRates.EnsuiteRegularRate = currRates.EnsuiteRegularRate And prevRates.EnsuiteWalkInRate = currRates.EnsuiteWalkInRate),
-                           $"RM{currRates.EnsuiteRegularRate}/RM{currRates.EnsuiteWalkInRate}",
-                           $"RM{prevRates.EnsuiteRegularRate}/RM{prevRates.EnsuiteWalkInRate} → RM{currRates.EnsuiteRegularRate}/RM{currRates.EnsuiteWalkInRate}"))
+                        If(currentApiRates.EnsuiteRegularRate = -1 Or (currentApiRates.EnsuiteRegularRate = calculatedRates.EnsuiteRegularRate And currentApiRates.EnsuiteWalkInRate = calculatedRates.EnsuiteWalkInRate),
+                           $"RM{calculatedRates.EnsuiteRegularRate}/RM{calculatedRates.EnsuiteWalkInRate}",
+                           $"RM{currentApiRates.EnsuiteRegularRate}/RM{currentApiRates.EnsuiteWalkInRate} → RM{calculatedRates.EnsuiteRegularRate}/RM{calculatedRates.EnsuiteWalkInRate}"))
         Next
 
         Return availabilityByDate
+    End Function
+
+    Private Function GetApiRatesFromResponse(propertyData As LittleHotelierResponse, targetDate As String) As PreviousRate
+        Dim apiRates As New PreviousRate With {
+        .DormRegularRate = 0,
+        .DormWalkInRate = 0,
+        .PrivateRegularRate = 0,
+        .PrivateWalkInRate = 0,
+        .EnsuiteRegularRate = 0,
+        .EnsuiteWalkInRate = 0
+    }
+
+        ' Add null checks for propertyData and rate_plans
+        If propertyData Is Nothing OrElse propertyData.rate_plans Is Nothing Then
+            Return apiRates
+        End If
+
+        For Each ratePlan In propertyData.rate_plans
+            ' Check if ratePlan and its properties are not null
+            If ratePlan Is Nothing OrElse ratePlan.rate_plan_dates Is Nothing OrElse String.IsNullOrEmpty(ratePlan.name) Then
+                Continue For
+            End If
+
+            Dim dateEntry = ratePlan.rate_plan_dates.FirstOrDefault(Function(d) d IsNot Nothing AndAlso d.date = targetDate)
+
+            ' Check if dateEntry was found and is not null
+            If dateEntry Is Nothing Then
+                Continue For
+            End If
+
+            Select Case ratePlan.name.ToLower()
+                Case "2 bed mixed dorm", "4 bed female dorm", "4 bed mixed dorm", "6 bed mixed dorm"
+                    ' Only set if not already set (first match wins)
+                    If apiRates.DormRegularRate = 0 Then
+                        apiRates.DormRegularRate = CDbl(dateEntry.rate)
+                    End If
+                Case "superior double (shared bathroom)"
+                    If apiRates.PrivateRegularRate = 0 Then
+                        apiRates.PrivateRegularRate = CDbl(dateEntry.rate)
+                    End If
+                Case "superior queen ensuite"
+                    If apiRates.EnsuiteRegularRate = 0 Then
+                        apiRates.EnsuiteRegularRate = CDbl(dateEntry.rate)
+                    End If
+            End Select
+        Next
+
+        Return apiRates
     End Function
 
 
@@ -273,87 +368,61 @@ Public Class DynamicPricingService
         Return (50, 40)
     End Function
 
-    Private Function GetPreviousRates(dateStr As String) As PreviousRate
-        Try
-            If File.Exists(rateStorageFile) Then
-                Dim json = File.ReadAllText(rateStorageFile)
-                Dim allRates = JsonConvert.DeserializeObject(Of Dictionary(Of String, PreviousRate))(json)
 
-                If allRates.ContainsKey(dateStr) Then
-                    Return allRates(dateStr)
-                End If
-            End If
-        Catch ex As Exception
-            Console.WriteLine($"Error reading previous rates: {ex.Message}")
-        End Try
-
-        Return New PreviousRate With {
-            .DormRegularRate = -1,
-            .DormWalkInRate = -1,
-            .PrivateRegularRate = -1,
-            .PrivateWalkInRate = -1,
-            .EnsuiteRegularRate = -1,
-            .EnsuiteWalkInRate = -1
-        }
-    End Function
-
-    Private Function CalculateRateChanges(availabilityData As Dictionary(Of String, RoomAvailability)) As List(Of RateChange)
+    Private Function CalculateRateChanges(availabilityData As Dictionary(Of String, RoomAvailability), propertyData As LittleHotelierResponse) As List(Of RateChange)
         Dim changes As New List(Of RateChange)
 
         For Each kvp In availabilityData
             Dim dateStr = kvp.Key
             Dim availability = kvp.Value
-            ' FIXED: Use DateTime.Today and DateDiff for accurate day calculation
             Dim daysAhead = DateDiff(DateInterval.Day, GetBusinessToday(), DateTime.Parse(dateStr))
 
             ' Only apply dynamic pricing for <15 days
             If daysAhead < 15 Then
-                Dim currentRates = GetCurrentRates(availability, dateStr)
-                Dim previousRates = GetPreviousRates(dateStr)
-                ' Check Dorm changes
-                If currentRates.DormRegularRate <> previousRates.DormRegularRate Or currentRates.DormWalkInRate <> previousRates.DormWalkInRate Then
-                    changes.Add(New RateChange With {
-                        .CheckDate = dateStr,
-                        .RoomType = GetAvailabilityDescription("Dorm", availability.DormBedsAvailable),
-                        .OldRegularRate = previousRates.DormRegularRate,
-                        .NewRegularRate = currentRates.DormRegularRate,
-                        .OldWalkInRate = previousRates.DormWalkInRate,
-                        .NewWalkInRate = currentRates.DormWalkInRate,
-                        .AvailableUnits = availability.DormBedsAvailable,
-                        .DaysAhead = daysAhead
-                    })
-                End If
+                Dim calculatedRates = GetCurrentRates(availability, dateStr)
+                Dim apiCurrentRates = GetApiRatesFromResponse(propertyData, dateStr) ' Use API instead of JSON
 
+                ' Check for rate changes using API rates as baseline
+                If calculatedRates.DormRegularRate <> apiCurrentRates.DormRegularRate Or calculatedRates.DormWalkInRate <> apiCurrentRates.DormWalkInRate Then
+                    changes.Add(New RateChange With {
+                    .CheckDate = dateStr,
+                    .RoomType = GetAvailabilityDescription("Dorm", availability.DormBedsAvailable),
+                    .OldRegularRate = apiCurrentRates.DormRegularRate,
+                    .NewRegularRate = calculatedRates.DormRegularRate,
+                    .OldWalkInRate = apiCurrentRates.DormWalkInRate,
+                    .NewWalkInRate = calculatedRates.DormWalkInRate,
+                    .AvailableUnits = availability.DormBedsAvailable,
+                    .DaysAhead = daysAhead
+                })
+                End If
                 ' Check Private changes
-                If currentRates.PrivateRegularRate <> previousRates.PrivateRegularRate Or currentRates.PrivateWalkInRate <> previousRates.PrivateWalkInRate Then
+                If calculatedRates.PrivateRegularRate <> apiCurrentRates.PrivateRegularRate Or calculatedRates.PrivateWalkInRate <> apiCurrentRates.PrivateWalkInRate Then
                     changes.Add(New RateChange With {
                         .CheckDate = dateStr,
                         .RoomType = GetAvailabilityDescription("Private", availability.PrivateRoomsAvailable),
-                        .OldRegularRate = previousRates.PrivateRegularRate,
-                        .NewRegularRate = currentRates.PrivateRegularRate,
-                        .OldWalkInRate = previousRates.PrivateWalkInRate,
-                        .NewWalkInRate = currentRates.PrivateWalkInRate,
+                        .OldRegularRate = apiCurrentRates.PrivateRegularRate,
+                        .NewRegularRate = calculatedRates.PrivateRegularRate,
+                        .OldWalkInRate = apiCurrentRates.PrivateWalkInRate,
+                        .NewWalkInRate = calculatedRates.PrivateWalkInRate,
                         .AvailableUnits = availability.PrivateRoomsAvailable,
                         .DaysAhead = daysAhead
                     })
                 End If
 
                 ' Check Ensuite changes
-                If currentRates.EnsuiteRegularRate <> previousRates.EnsuiteRegularRate Or currentRates.EnsuiteWalkInRate <> previousRates.EnsuiteWalkInRate Then
+                If calculatedRates.EnsuiteRegularRate <> apiCurrentRates.EnsuiteRegularRate Or calculatedRates.EnsuiteWalkInRate <> apiCurrentRates.EnsuiteWalkInRate Then
                     changes.Add(New RateChange With {
                         .CheckDate = dateStr,
                         .RoomType = GetAvailabilityDescription("Ensuite", availability.PrivateEnsuitesAvailable),
-                        .OldRegularRate = previousRates.EnsuiteRegularRate,
-                        .NewRegularRate = currentRates.EnsuiteRegularRate,
-                        .OldWalkInRate = previousRates.EnsuiteWalkInRate,
-                        .NewWalkInRate = currentRates.EnsuiteWalkInRate,
+                        .OldRegularRate = apiCurrentRates.EnsuiteRegularRate,
+                        .NewRegularRate = calculatedRates.EnsuiteRegularRate,
+                        .OldWalkInRate = apiCurrentRates.EnsuiteWalkInRate,
+                        .NewWalkInRate = calculatedRates.EnsuiteWalkInRate,
                         .AvailableUnits = availability.PrivateEnsuitesAvailable,
                         .DaysAhead = daysAhead
                     })
                 End If
 
-                ' Update stored rates
-                UpdateStoredRates(dateStr, currentRates)
             End If
         Next
 
@@ -389,33 +458,6 @@ Public Class DynamicPricingService
         End Select
         Return roomType
     End Function
-
-    Private Sub UpdateStoredRates(dateStr As String, rates As PreviousRate)
-        Try
-            Dim allRates As New Dictionary(Of String, PreviousRate)
-
-            If File.Exists(rateStorageFile) Then
-                Dim json = File.ReadAllText(rateStorageFile)
-                allRates = JsonConvert.DeserializeObject(Of Dictionary(Of String, PreviousRate))(json)
-            End If
-
-            rates.LastUpdated = DateTime.Now
-            allRates(dateStr) = rates
-
-            ' Clean up old entries (older than 7 days)
-            Dim cutoffDate = DateTime.Now.AddDays(-7).ToString("yyyy-MM-dd")
-            Dim keysToRemove = allRates.Keys.Where(Function(k) String.Compare(k, cutoffDate) < 0).ToList()
-            For Each key In keysToRemove
-                allRates.Remove(key)
-            Next
-
-            Dim updatedJson = JsonConvert.SerializeObject(allRates, Formatting.Indented)
-            File.WriteAllText(rateStorageFile, updatedJson)
-
-        Catch ex As Exception
-            Console.WriteLine($"Error updating stored rates: {ex.Message}")
-        End Try
-    End Sub
 
     Public Async Function SendEmailNotificationAsync(changes As List(Of RateChange)) As Task
         Try

@@ -64,10 +64,10 @@ Namespace My
     Friend Module MySettingsProperty
 
         <Global.System.ComponentModel.Design.HelpKeywordAttribute("My.Settings")> _
-        Friend ReadOnly Property Settings() As Global.Red_Inn_Court_Dynamic_Pricing.My.MySettings
-            Get
-                Return Global.Red_Inn_Court_Dynamic_Pricing.My.MySettings.Default
-            End Get
-        End Property
+Friend ReadOnly Property Settings() As Global.RedInnCourtDynamicPricing.My.MySettings
+    Get
+        Return Global.RedInnCourtDynamicPricing.My.MySettings.Default
+    End Get
+End Property
     End Module
 End Namespace

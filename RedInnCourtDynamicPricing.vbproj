@@ -6,9 +6,9 @@
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
     <ProjectGuid>{8EE95305-7F05-4126-864D-F852B22DF135}</ProjectGuid>
     <OutputType>Exe</OutputType>
-    <StartupObject>Red_Inn_Court_Dynamic_Pricing.Module1</StartupObject>
-    <RootNamespace>Red_Inn_Court_Dynamic_Pricing</RootNamespace>
-    <AssemblyName>Red Inn Court Dynamic Pricing</AssemblyName>
+    <StartupObject>RedInnCourtDynamicPricing.Module1</StartupObject>
+    <RootNamespace>RedInnCourtDynamicPricing</RootNamespace>
+    <AssemblyName>RedInnCourtDynamicPricing</AssemblyName>
     <FileAlignment>512</FileAlignment>
     <MyType>Console</MyType>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
@@ -37,7 +37,7 @@
     <DefineDebug>true</DefineDebug>
     <DefineTrace>true</DefineTrace>
     <OutputPath>bin\Debug\</OutputPath>
-    <DocumentationFile>Red Inn Court Dynamic Pricing.xml</DocumentationFile>
+    <DocumentationFile>RedInnCourtDynamicPricing.xml</DocumentationFile>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
