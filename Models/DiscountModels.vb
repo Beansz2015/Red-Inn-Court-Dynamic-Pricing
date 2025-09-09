@@ -19,3 +19,12 @@ Public Class PreviousRate
     Public Property EnsuiteWalkInRate As Double
     Public Property LastUpdated As DateTime
 End Class
+
+' NEW: QuietPeriod model class
+Public Class QuietPeriod
+    Public Property Name As String
+    Public Property DayOfWeek As DayOfWeek
+    Public Property StartTime As TimeSpan
+    Public Property EndTime As TimeSpan
+    Public Property Enabled As Boolean
+End Class

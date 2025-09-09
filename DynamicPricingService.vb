@@ -56,6 +56,115 @@ Public Class DynamicPricingService
         Return GetBusinessDateTime().Date
     End Function
 
+    ' NEW: Check if current time is in email quiet period (using Google Sheets)
+    Private Function IsEmailQuietPeriod() As Boolean
+        Try
+            If googleSheetsService IsNot Nothing AndAlso googleSheetsService.IsGoogleSheetsEnabled() Then
+                Dim quietPeriods = googleSheetsService.GetQuietPeriods()
+                Dim now = GetBusinessDateTime()
+                Dim currentDay = now.DayOfWeek
+                Dim currentTime = now.TimeOfDay
+
+                For Each period In quietPeriods
+                    If period.Enabled AndAlso period.DayOfWeek = currentDay Then
+                        ' Handle periods that span midnight
+                        If period.EndTime < period.StartTime Then
+                            ' Period spans midnight (e.g., 22:00 to 06:00)
+                            If currentTime >= period.StartTime OrElse currentTime < period.EndTime Then
+                                Return True
+                            End If
+                        Else
+                            ' Normal period (e.g., 08:00 to 16:00)
+                            If currentTime >= period.StartTime AndAlso currentTime < period.EndTime Then
+                                Return True
+                            End If
+                        End If
+                    End If
+                Next
+            End If
+        Catch ex As Exception
+            Console.WriteLine($"Error checking quiet periods from Google Sheets: {ex.Message}")
+        End Try
+
+        ' Fallback to hardcoded periods if Google Sheets fails
+        Return IsEmailQuietPeriodFallback()
+    End Function
+
+    ' NEW: Get description of current quiet period (using Google Sheets)
+    Private Function GetQuietPeriodDescription() As String
+        Try
+            If googleSheetsService IsNot Nothing AndAlso googleSheetsService.IsGoogleSheetsEnabled() Then
+                Dim quietPeriods = googleSheetsService.GetQuietPeriods()
+                Dim now = GetBusinessDateTime()
+                Dim currentDay = now.DayOfWeek
+                Dim currentTime = now.TimeOfDay
+
+                For Each period In quietPeriods
+                    If period.Enabled AndAlso period.DayOfWeek = currentDay Then
+                        Dim isInPeriod As Boolean = False
+
+                        ' Handle periods that span midnight
+                        If period.EndTime < period.StartTime Then
+                            isInPeriod = (currentTime >= period.StartTime OrElse currentTime < period.EndTime)
+                        Else
+                            isInPeriod = (currentTime >= period.StartTime AndAlso currentTime < period.EndTime)
+                        End If
+
+                        If isInPeriod Then
+                            Return $"{period.Name} ({period.StartTime:hh\:mm}-{period.EndTime:hh\:mm})"
+                        End If
+                    End If
+                Next
+            End If
+        Catch ex As Exception
+            Console.WriteLine($"Error getting quiet period description from Google Sheets: {ex.Message}")
+        End Try
+
+        ' Fallback to hardcoded description
+        Return GetQuietPeriodDescriptionFallback()
+    End Function
+
+    ' FALLBACK: Hardcoded quiet period check (your original logic)
+    Private Function IsEmailQuietPeriodFallback() As Boolean
+        Dim now = GetBusinessDateTime()
+        Dim dayOfWeek = now.DayOfWeek
+        Dim timeOfDay = now.TimeOfDay
+
+        ' 1. 12am - 8am every day (00:00 - 08:00)
+        If timeOfDay >= New TimeSpan(0, 0, 0) AndAlso timeOfDay < New TimeSpan(8, 0, 0) Then
+            Return True
+        End If
+
+        ' 2. 4pm - 12am every Saturday (16:00 - 23:59)
+        If dayOfWeek = DayOfWeek.Saturday AndAlso timeOfDay >= New TimeSpan(16, 0, 0) Then
+            Return True
+        End If
+
+        ' 3. 8am - 4pm every Sunday (08:00 - 16:00)
+        If dayOfWeek = DayOfWeek.Sunday AndAlso timeOfDay >= New TimeSpan(8, 0, 0) AndAlso timeOfDay < New TimeSpan(16, 0, 0) Then
+            Return True
+        End If
+
+        Return False
+    End Function
+
+    ' FALLBACK: Hardcoded quiet period description
+    Private Function GetQuietPeriodDescriptionFallback() As String
+        Dim now = GetBusinessDateTime()
+        Dim dayOfWeek = now.DayOfWeek
+        Dim timeOfDay = now.TimeOfDay
+
+        If timeOfDay >= New TimeSpan(0, 0, 0) AndAlso timeOfDay < New TimeSpan(8, 0, 0) Then
+            Return "Daily quiet period (12am - 8am)"
+        ElseIf dayOfWeek = DayOfWeek.Saturday AndAlso timeOfDay >= New TimeSpan(16, 0, 0) Then
+            Return "Saturday evening quiet period (4pm - 12am)"
+        ElseIf dayOfWeek = DayOfWeek.Sunday AndAlso timeOfDay >= New TimeSpan(8, 0, 0) AndAlso timeOfDay < New TimeSpan(16, 0, 0) Then
+            Return "Sunday daytime quiet period (8am - 4pm)"
+        Else
+            Return "Unknown quiet period"
+        End If
+    End Function
+
     Public Async Function RunDynamicPricingCheck() As Task
         Dim errorToReport As String = Nothing
         Dim propertyData As LittleHotelierResponse = Nothing
@@ -77,7 +186,7 @@ Public Class DynamicPricingService
             ' Send email notifications if there are changes
             If rateChanges.Any() Then
                 Await SendEmailNotificationAsync(rateChanges)
-                Console.WriteLine($"Sent email notification for {rateChanges.Count} rate changes")
+                Console.WriteLine($"Processed {rateChanges.Count} rate changes")
             Else
                 Console.WriteLine("No rate changes detected")
             End If
@@ -332,12 +441,11 @@ Public Class DynamicPricingService
                 End If
         End Select
 
-        ' NEW: Try Google Sheets first, fallback to App.config
+        ' Try Google Sheets first, fallback to App.config
         Try
             If googleSheetsService IsNot Nothing AndAlso googleSheetsService.IsGoogleSheetsEnabled() Then
                 Dim googleRates = googleSheetsService.GetRateData()
                 If googleRates.ContainsKey(configKey) Then
-                    'Console.WriteLine($"Using Google Sheets rate for {configKey}")
                     Return googleRates(configKey)
                 Else
                     Console.WriteLine($"Rate {configKey} not found in Google Sheets, using App.config fallback")
@@ -452,16 +560,48 @@ Public Class DynamicPricingService
         Return roomType
     End Function
 
+    ' UPDATED: Rate change notifications with quiet period check
     Public Async Function SendEmailNotificationAsync(changes As List(Of RateChange)) As Task
         Try
+            ' Check if we're in a quiet period
+            If IsEmailQuietPeriod() Then
+                Console.WriteLine($"📧 Suppressed rate change email during {GetQuietPeriodDescription()}")
+                Console.WriteLine($"   Would have sent notification for {changes.Count} rate changes")
+                Return
+            End If
+
             Dim subject = "🏨 Red Inn Court - Rate Update"
             Dim body = BuildRateChangeEmailBody(changes)
 
             Await SendEmailAsync(subject, body, False)
-            Console.WriteLine("Email notification sent successfully")
+            Console.WriteLine("✅ Email notification sent successfully")
 
         Catch ex As Exception
-            Console.WriteLine($"Error sending email notification: {ex.Message}")
+            Console.WriteLine($"❌ Error sending email notification: {ex.Message}")
+        End Try
+    End Function
+
+    ' UPDATED: Error notifications - always send (critical)
+    Public Async Function SendEmailErrorNotificationAsync(errorMessage As String) As Task
+        Try
+            ' Check if we're in a quiet period
+            If IsEmailQuietPeriod() Then
+                Console.WriteLine($"⚠️  Sending critical error email despite {GetQuietPeriodDescription()}")
+            End If
+
+            Dim subject = "🚨 Dynamic Pricing Error Alert"
+            Dim body = $"<h2>🚨 DYNAMIC PRICING ERROR 🚨</h2>" &
+                      $"<div style='padding: 15px; background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 5px; color: #721c24;'>" &
+                      $"<p><strong>❌ Error:</strong> {errorMessage}</p>" &
+                      $"<p><strong>⏰ Time:</strong> {DateTime.Now:yyyy-MM-dd HH:mm}</p>" &
+                      $"</div>" &
+                      $"<p>Please check the application logs for more details.</p>"
+
+            Await SendEmailAsync(subject, body, True)
+            Console.WriteLine("✅ Error email notification sent successfully")
+
+        Catch ex As Exception
+            Console.WriteLine($"❌ Error sending email error notification: {ex.Message}")
         End Try
     End Function
 
@@ -498,24 +638,6 @@ Public Class DynamicPricingService
         body.AppendLine($"<p style='font-size: 0.9em; color: #6c757d;'><em>Note: Rates sourced from Google Sheets with App.config fallback. Walk-in rates calculated automatically.</em></p>")
 
         Return body.ToString()
-    End Function
-
-    Public Async Function SendEmailErrorNotificationAsync(errorMessage As String) As Task
-        Try
-            Dim subject = "🚨 Dynamic Pricing Error Alert"
-            Dim body = $"<h2>🚨 DYNAMIC PRICING ERROR 🚨</h2>" &
-                      $"<div style='padding: 15px; background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 5px; color: #721c24;'>" &
-                      $"<p><strong>❌ Error:</strong> {errorMessage}</p>" &
-                      $"<p><strong>⏰ Time:</strong> {DateTime.Now:yyyy-MM-dd HH:mm}</p>" &
-                      $"</div>" &
-                      $"<p>Please check the application logs for more details.</p>"
-
-            Await SendEmailAsync(subject, body, True)
-            Console.WriteLine("Error email notification sent successfully")
-
-        Catch ex As Exception
-            Console.WriteLine($"Error sending email error notification: {ex.Message}")
-        End Try
     End Function
 
     Private Async Function SendEmailAsync(subject As String, body As String, isError As Boolean) As Task
