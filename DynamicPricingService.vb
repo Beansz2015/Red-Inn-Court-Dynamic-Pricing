@@ -656,11 +656,18 @@ Public Class DynamicPricingService
         End Try
     End Function
 
-    ' NEW: Log price changes to analytics
+    ' UPDATED: Log price changes to analytics with quiet period check
     Private Sub LogPriceChangeToAnalytics(change As RateChange, available As Integer, total As Integer, category As String)
         If googleSheetsService Is Nothing Then Return
 
         Try
+            ' Check if we're in a quiet period - suppress analytics logging as well
+            If IsEmailQuietPeriod() Then
+                Console.WriteLine($"📊 Suppressed {category} analytics logging during {GetQuietPeriodDescription()}")
+                Console.WriteLine($"   Would have logged rate change: {change.OldRegularRate} → {change.NewRegularRate}")
+                Return
+            End If
+
             Dim entry As New PriceHistoryEntry With {
             .Timestamp = GetBusinessDateTime(),
             .CheckInDate = change.CheckDate,
@@ -689,6 +696,7 @@ Public Class DynamicPricingService
             Console.WriteLine($"Failed to log price change to analytics: {ex.Message}")
         End Try
     End Sub
+
 
     Private Function GetPriceTier(category As String, available As Integer) As String
         Select Case category.ToLower()
