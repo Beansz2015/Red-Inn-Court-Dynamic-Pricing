@@ -28,3 +28,23 @@ Public Class QuietPeriod
     Public Property EndTime As TimeSpan
     Public Property Enabled As Boolean
 End Class
+
+' NEW: Price History Analytics Entry
+Public Class PriceHistoryEntry
+    Public Property Timestamp As DateTime
+    Public Property CheckInDate As String
+    Public Property RoomType As String
+    Public Property RoomCategory As String
+    Public Property AvailableUnits As Integer
+    Public Property TotalCapacity As Integer
+    Public Property OccupancyRate As Double
+    Public Property DaysAhead As Integer
+    Public Property OldRate As Double
+    Public Property NewRate As Double
+    Public Property RateChange As Double
+    Public Property PercentChange As Double
+    Public Property PriceTier As String
+    Public Property DayType As String
+    Public Property BusinessHour As Integer
+    Public Property ConfigSource As String
+End Class

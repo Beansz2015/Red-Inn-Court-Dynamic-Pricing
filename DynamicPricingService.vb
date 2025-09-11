@@ -495,6 +495,8 @@ Public Class DynamicPricingService
                         .AvailableUnits = availability.DormBedsAvailable,
                         .DaysAhead = daysAhead
                     })
+
+                    LogPriceChangeToAnalytics(changes.Last(), availability.DormBedsAvailable, totalDormBeds, "Dorm")
                 End If
 
                 ' Check Private REGULAR rate changes only
@@ -509,6 +511,8 @@ Public Class DynamicPricingService
                         .AvailableUnits = availability.PrivateRoomsAvailable,
                         .DaysAhead = daysAhead
                     })
+
+                    LogPriceChangeToAnalytics(changes.Last(), availability.PrivateRoomsAvailable, totalPrivateRooms, "Private")
                 End If
 
                 ' Check Ensuite REGULAR rate changes only
@@ -523,6 +527,8 @@ Public Class DynamicPricingService
                         .AvailableUnits = availability.PrivateEnsuitesAvailable,
                         .DaysAhead = daysAhead
                     })
+
+                    LogPriceChangeToAnalytics(changes.Last(), availability.PrivateEnsuitesAvailable, totalEnsuiteRooms, "Ensuite")
                 End If
             End If
         Next
@@ -665,6 +671,59 @@ Public Class DynamicPricingService
             Console.WriteLine($"Error sending email: {ex.Message}")
             Throw
         End Try
+    End Function
+
+    ' NEW: Log price changes to analytics
+    Private Sub LogPriceChangeToAnalytics(change As RateChange, available As Integer, total As Integer, category As String)
+        If googleSheetsService Is Nothing Then Return
+
+        Try
+            Dim entry As New PriceHistoryEntry With {
+            .Timestamp = GetBusinessDateTime(),
+            .CheckInDate = change.CheckDate,
+            .RoomType = change.RoomType,
+            .RoomCategory = category,
+            .AvailableUnits = available,
+            .TotalCapacity = total,
+            .OccupancyRate = If(total > 0, CDbl(total - available) / total, 0),
+            .DaysAhead = change.DaysAhead,
+            .OldRate = change.OldRegularRate,
+            .NewRate = change.NewRegularRate,
+            .RateChange = change.NewRegularRate - change.OldRegularRate,
+            .PercentChange = If(change.OldRegularRate > 0, (change.NewRegularRate - change.OldRegularRate) / change.OldRegularRate, 0),
+            .PriceTier = GetPriceTier(category, available),
+            .DayType = If(change.DaysAhead = 0, "Today", If(change.DaysAhead = 1, "Day+1", "Day>+2")),
+            .BusinessHour = GetBusinessDateTime().Hour,
+            .ConfigSource = If(googleSheetsService.IsGoogleSheetsEnabled(), "GoogleSheets", "AppConfig")
+        }
+
+            Dim success = googleSheetsService.LogPriceChangeToAnalytics(entry)
+            If success Then
+                Console.WriteLine($"✓ Logged {category} rate change to analytics")
+            End If
+
+        Catch ex As Exception
+            Console.WriteLine($"Failed to log price change to analytics: {ex.Message}")
+        End Try
+    End Sub
+
+    Private Function GetPriceTier(category As String, available As Integer) As String
+        Select Case category.ToLower()
+            Case "dorm"
+                If available >= 8 Then Return "8Plus"
+                If available >= 4 Then Return "4to7"
+                If available >= 2 Then Return "2to3"
+                Return "1"
+            Case "private"
+                If available >= 3 Then Return "3Rooms"
+                If available >= 2 Then Return "2Rooms"
+                Return "1Room"
+            Case "ensuite"
+                If available >= 2 Then Return "2Rooms"
+                Return "1Room"
+            Case Else
+                Return "Unknown"
+        End Select
     End Function
 
 End Class
