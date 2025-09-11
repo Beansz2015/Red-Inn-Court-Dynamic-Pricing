@@ -539,32 +539,15 @@ Public Class DynamicPricingService
     Private Function GetAvailabilityDescription(roomType As String, available As Integer) As String
         Select Case roomType.ToLower()
             Case "dorm"
-                If available >= 8 Then
-                    Return "Dorm Beds (8+ available)"
-                ElseIf available >= 4 Then
-                    Return "Dorm Beds (4-7 available)"
-                ElseIf available >= 2 Then
-                    Return "Dorm Beds (2-3 available)"
-                Else
-                    Return "Dorm Beds (1 available)"
-                End If
+                Return "Dorm Beds"
             Case "private"
-                If available >= 3 Then
-                    Return "Private Rooms - Shared Bath (3 available)"
-                ElseIf available >= 2 Then
-                    Return "Private Rooms - Shared Bath (2 available)"
-                Else
-                    Return "Private Rooms - Shared Bath (1 available)"
-                End If
+                Return "Private Rooms - Shared Bath"
             Case "ensuite"
-                If available >= 2 Then
-                    Return "Queen Ensuite (2 available)"
-                Else
-                    Return "Queen Ensuite (1 available)"
-                End If
+                Return "Queen Ensuite"
         End Select
         Return roomType
     End Function
+
 
     ' UPDATED: Rate change notifications with quiet period check
     Public Async Function SendEmailNotificationAsync(changes As List(Of RateChange)) As Task
